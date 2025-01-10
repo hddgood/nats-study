@@ -2,7 +2,7 @@ module github.com/nats-io/nats-server/v2
 
 go 1.22
 
-toolchain go1.22.8
+toolchain go1.22.4
 
 require (
 	github.com/google/go-tpm v0.9.3

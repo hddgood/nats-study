@@ -2183,6 +2183,7 @@ func (s *Server) jsStreamInfoRequest(sub *subscription, c *client, a *Account, s
 }
 
 // Request to have a stream leader stepdown.
+// 该方法用于请求流的领导者下台。
 func (s *Server) jsStreamLeaderStepDownRequest(sub *subscription, c *client, _ *Account, subject, reply string, rmsg []byte) {
 	if c == nil || !s.JetStreamEnabled() {
 		return
@@ -2206,6 +2207,7 @@ func (s *Server) jsStreamLeaderStepDownRequest(sub *subscription, c *client, _ *
 	}
 
 	// If we are here we are clustered. See if we are the stream leader in order to proceed.
+	// 如果现在是集群模式，那么我们需要是流的领导者才能继续。
 	js, cc := s.getJetStreamCluster()
 	if js == nil || cc == nil {
 		return
@@ -2271,11 +2273,13 @@ func (s *Server) jsStreamLeaderStepDownRequest(sub *subscription, c *client, _ *
 	var preferredLeader string
 	if isJSONObjectOrArray(msg) {
 		var req JSApiLeaderStepdownRequest
+		// 解析请求
 		if err := s.unmarshalRequest(c, acc, subject, msg, &req); err != nil {
 			resp.Error = NewJSInvalidJSONError(err)
 			s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
 			return
 		}
+		// 获取首选领导者
 		if preferredLeader, resp.Error = s.getStepDownPreferredPlacement(node, req.Placement); resp.Error != nil {
 			s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
 			return
@@ -2295,6 +2299,7 @@ func (s *Server) jsStreamLeaderStepDownRequest(sub *subscription, c *client, _ *
 }
 
 // Request to have a consumer leader stepdown.
+// 该方法用于请求消费者的领导者下台。
 func (s *Server) jsConsumerLeaderStepDownRequest(sub *subscription, c *client, _ *Account, subject, reply string, rmsg []byte) {
 	if c == nil || !s.JetStreamEnabled() {
 		return

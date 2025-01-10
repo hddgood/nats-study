@@ -7064,6 +7064,7 @@ func (fs *fileStore) numConsumers() int {
 
 // FastState will fill in state with only the following.
 // Msgs, Bytes, First and Last Sequence and Time and NumDeleted.
+// FastState 将状态填充为以下内容：Msgs、Bytes、First 和 Last 序列号以及时间戳和 NumDeleted。
 func (fs *fileStore) FastState(state *StreamState) {
 	fs.mu.RLock()
 	state.Msgs = fs.state.Msgs

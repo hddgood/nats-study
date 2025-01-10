@@ -294,8 +294,8 @@ type stream struct {
 	created   time.Time               // Time the stream was created.
 	stype     StorageType             // The storage type.
 	tier      string                  // The tier is the number of replicas for the stream (e.g. "R1" or "R3").
-	ddmap     map[string]*ddentry     // The dedupe map.
-	ddarr     []*ddentry              // The dedupe array.
+	ddmap     map[string]*ddentry     // The dedupe map. // 用于去重的map
+	ddarr     []*ddentry              // The dedupe array. // 用于去重的数组
 	ddindex   int                     // The dedupe index.
 	ddtmr     *time.Timer             // The dedupe timer.
 	qch       chan struct{}           // The quit channel.
@@ -349,14 +349,17 @@ type stream struct {
 	clMu       sync.Mutex        // The mutex for clseq and clfs.
 	clseq      uint64            // The current last seq being proposed to the NRG layer.
 	clfs       uint64            // The count (offset) of the number of failed NRG sequences used to compute clseq.
-	inflight   map[uint64]uint64 // Inflight message sizes per clseq.
+	inflight   map[uint64]uint64 // Inflight message sizes per clseq. // 记录正在处理的每条消息的序列号和消息大小
 	lqsent     time.Time         // The time at which the last lost quorum advisory was sent. Used to rate limit.
 	uch        chan struct{}     // The channel to signal updates to the monitor routine.
 	compressOK bool              // True if we can do message compression in RAFT and catchup logic
 	inMonitor  bool              // True if the monitor routine has been started.
 
-	expectedPerSubjectReady     bool                // Initially blocks 'expected per subject' changes until leader is initially caught up with stored but not applied entries.
-	expectedPerSubjectSequence  map[uint64]string   // Inflight 'expected per subject' subjects per clseq.
+	// 用于记录按照主题的序列号顺序是否已经准备好
+	expectedPerSubjectReady bool // Initially blocks 'expected per subject' changes until leader is initially caught up with stored but not applied entries.
+	// 记录正在处理的消息的序列号对应的主题
+	expectedPerSubjectSequence map[uint64]string // Inflight 'expected per subject' subjects per clseq.
+	// 记录正在处理的subject key:subject value:struct{} 类似于一个Set
 	expectedPerSubjectInProcess map[string]struct{} // Current 'expected per subject' subjects in process.
 
 	// Direct get subscription.
@@ -1075,6 +1078,7 @@ func (mset *stream) rebuildDedupe() {
 	mset.ddloaded = true
 
 	// We have some messages. Lookup starting sequence by duplicate time window.
+	// 加载时间窗口内的消息
 	sseq := mset.store.GetSeqFromTime(time.Now().Add(-mset.cfg.Duplicates))
 	if sseq == 0 {
 		return
@@ -1084,17 +1088,21 @@ func (mset *stream) rebuildDedupe() {
 	var state StreamState
 	mset.store.FastState(&state)
 
+	// 遍历时间窗口内的消息
 	for seq := sseq; seq <= state.LastSeq; seq++ {
 		sm, err := mset.store.LoadMsg(seq, &smv)
 		if err != nil {
 			continue
 		}
 		var msgId string
+		// 如果消息头不为空，则获取消息ID
 		if len(sm.hdr) > 0 {
 			if msgId = getMsgId(sm.hdr); msgId != _EMPTY_ {
+				// 将消息ID和序列号、时间戳存储到ddmap中
 				mset.storeMsgIdLocked(&ddentry{msgId, sm.seq, sm.ts})
 			}
 		}
+		// 如果消息是时间窗口内的最后一条消息，则将消息ID存储到lmsgId中
 		if seq == state.LastSeq {
 			mset.lmsgId = msgId
 		}
@@ -3473,8 +3481,10 @@ func (mset *stream) processInboundSourceMsg(si *sourceInfo, m *inMsg) bool {
 	var err error
 	// If we are clustered we need to propose this message to the underlying raft group.
 	if node != nil {
+		// 处理集群消息
 		err = mset.processClusteredInboundMsg(m.subj, _EMPTY_, hdr, msg, nil)
 	} else {
+		// 处理单机消息
 		err = mset.processJetStreamMsg(m.subj, _EMPTY_, hdr, msg, 0, 0, nil)
 	}
 
@@ -4646,6 +4656,8 @@ var (
 
 // processJetStreamMsg is where we try to actually process the stream msg.
 func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, lseq uint64, ts int64, mt *msgTrace) (retErr error) {
+	fmt.Println("processJetStreamMsg param subject:", subject, "reply:", reply, "hdr:", hdr, "msg:", msg, "lseq:", lseq, "ts:", ts, "mt:", mt)
+	// 用于消息监控 只有leader/standalone处理消息的时候 mt!=nil
 	if mt != nil {
 		// Only the leader/standalone will have mt!=nil. On exit, send the
 		// message trace event.
@@ -4654,33 +4666,42 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 		}()
 	}
 
+	// 如果流已经关闭，则返回错误
 	if mset.closed.Load() {
 		return errStreamClosed
 	}
 
+	// 上锁
 	mset.mu.Lock()
+	// server和store
 	s, store := mset.srv, mset.store
 
+	// 判断消息是否是监控消息
 	traceOnly := mt.traceOnly()
+	// bumpCLFS是用来处理错误消息（比如流关闭、消息错误等等）
 	bumpCLFS := func() {
 		// Do not bump if tracing and not doing message delivery.
 		if traceOnly {
 			return
 		}
+		// 增加CLFS 记录错误的消息的数量
 		mset.clMu.Lock()
 		mset.clfs++
 		mset.clMu.Unlock()
 	}
 
 	// Apply the input subject transform if any
+	// 对输入的主题进行匹配
 	if mset.itr != nil {
 		ts, err := mset.itr.Match(subject)
 		if err == nil {
 			// no filtering: if the subject doesn't map the source of the transform, don't change it
+			// 如果主题没有被匹配，则不改变主题
 			subject = ts
 		}
 	}
 
+	// accountName
 	var accName string
 	if mset.acc != nil {
 		accName = mset.acc.Name
@@ -4698,6 +4719,7 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 	var resp = &JSPubAckResponse{}
 
 	// Bail here if sealed.
+	// stream是否被关闭
 	if isSealed {
 		outq := mset.outq
 		mset.mu.Unlock()
@@ -4712,20 +4734,25 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 	}
 
 	var buf [256]byte
+	// 添加在切片头部
 	pubAck := append(buf[:0], mset.pubAck...)
 
 	// If this is a non-clustered msg and we are not considered active, meaning no active subscription, do not process.
+	// 如果消息的序列号为0，时间戳为0，并且流不是active状态
 	if lseq == 0 && ts == 0 && !mset.active {
 		mset.mu.Unlock()
 		return nil
 	}
 
 	// For clustering the lower layers will pass our expected lseq. If it is present check for that here.
+	// 如果消息的序列号大于0，并且消息的序列号不等于流当前的序列号+CLFS
 	if lseq > 0 && lseq != (mset.lseq+mset.clfs) {
+		// 有中间丢失的消息
 		isMisMatch := true
 		// We may be able to recover here if we have no state whatsoever, or we are a mirror.
 		// See if we have to adjust our starting sequence.
 		if mset.lseq == 0 || mset.cfg.Mirror != nil {
+			// 判断是否特殊情况需要调整一下stream的序列号
 			var state StreamState
 			mset.store.FastState(&state)
 			if state.FirstSeq == 0 {
@@ -4736,6 +4763,7 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 		}
 		// Really is a mismatch.
 		if isMisMatch {
+			// 如果确实不匹配，返回丢消息错误
 			outq := mset.outq
 			mset.mu.Unlock()
 			if canRespond && outq != nil {
@@ -4765,6 +4793,7 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 		// Certain checks have already been performed if in clustered mode, so only check if not.
 		// Note, for cluster mode but with message tracing (without message delivery), we need
 		// to do this check here since it was not done in processClusteredInboundMsg().
+		// 这里检查消息的流是否匹配，如果流不是集群模式，或者是集群的主节点
 		if !isClustered || traceOnly {
 			// Expected stream.
 			if sname := getExpectedStream(hdr); sname != _EMPTY_ && sname != name {
@@ -4782,6 +4811,7 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 
 		// Dedupe detection. This is done at the cluster level for dedupe detectiom above the
 		// lower layers. But we still need to pull out the msgId.
+		// 检查msgID是否重复
 		if msgId = getMsgId(hdr); msgId != _EMPTY_ {
 			// Do real check only if not clustered or traceOnly flag is set.
 			if !isClustered || traceOnly {
@@ -4799,8 +4829,11 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 		}
 
 		// Expected last sequence per subject.
+		// 获取期望的序列号
 		if seq, exists := getExpectedLastSeqPerSubject(hdr); exists {
+			fmt.Println("getExpectedLastSeqPerSubject seq:", seq, "exists:", exists)
 			// Allow override of the subject used for the check.
+			// 获取期望的主题
 			seqSubj := subject
 			if optSubj := getExpectedLastSeqPerSubjectForSubject(hdr); optSubj != _EMPTY_ {
 				seqSubj = optSubj
@@ -4809,6 +4842,7 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 			// TODO(dlc) - We could make a new store func that does this all in one.
 			var smv StoreMsg
 			var fseq uint64
+			// 获取期望的主题的最后一条消息
 			sm, err := store.LoadLastMsg(seqSubj, &smv)
 			if sm != nil {
 				fseq = sm.seq
@@ -4825,6 +4859,7 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 					}
 				}
 			}
+			// 如果获取期望的主题的最后一条消息失败，或者期望的序列号不等于获取的序列号
 			if err != nil || fseq != seq {
 				mset.mu.Unlock()
 				bumpCLFS()
@@ -4991,6 +5026,7 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 
 	// If here we will attempt to store the message.
 	// Assume this will succeed.
+	// 这里我们会尝试存储消息，假设会成功
 	olmsgId := mset.lmsgId
 	mset.lmsgId = msgId
 	clfs := mset.clfs
@@ -5049,6 +5085,7 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 	}
 
 	// Store actual msg.
+	// 存储消息
 	if lseq == 0 && ts == 0 {
 		seq, ts, err = store.StoreMsg(subject, hdr, msg, ttl)
 	} else {
@@ -5149,6 +5186,7 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 	}
 
 	// Signal consumers for new messages.
+	// 将消息发送到消费者的进程队列里面去
 	if numConsumers > 0 {
 		mset.sigq.push(newCMsg(subject, seq))
 		select {

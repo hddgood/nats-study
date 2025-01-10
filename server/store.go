@@ -127,25 +127,32 @@ type RetentionPolicy int
 const (
 	// LimitsPolicy (default) means that messages are retained until any given limit is reached.
 	// This could be one of MaxMsgs, MaxBytes, or MaxAge.
+	// LimitsPolicy（默认）意味着消息将被保留，直到达到任何给定的限制。
 	LimitsPolicy RetentionPolicy = iota
 	// InterestPolicy specifies that when all known consumers have acknowledged a message it can be removed.
+	// InterestPolicy意味着当所有已知的消费者都确认了一条消息时，可以将其删除。
 	InterestPolicy
 	// WorkQueuePolicy specifies that when the first worker or subscriber acknowledges the message it can be removed.
+	// WorkQueuePolicy指定，当第一个工作进程或订阅者确认消息时，可以将其删除。
 	WorkQueuePolicy
 )
 
-// Discard Policy determines how we proceed when limits of messages or bytes are hit. The default, DicscardOld will
+// DiscardPolicy Discard Policy determines how we proceed when limits of messages or bytes are hit. The default, DicscardOld will
 // remove older messages. DiscardNew will fail to store the new message.
+// 丢弃策略决定了当消息或字节达到限制时我们如何继续. 默认情况下，DiscardOld会删除旧消息,DiscardNew存储新消息会失败
 type DiscardPolicy int
 
 const (
 	// DiscardOld will remove older messages to return to the limits.
+	// 丢弃旧消息以返回限制
 	DiscardOld = iota
 	// DiscardNew will error on a StoreMsg call
+	// 丢弃新消息
 	DiscardNew
 )
 
 // StreamState is information about the given stream.
+// StreamState 是关于给定流的信息。
 type StreamState struct {
 	Msgs        uint64            `json:"messages"`
 	Bytes       uint64            `json:"bytes"`

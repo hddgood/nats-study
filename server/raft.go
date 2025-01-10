@@ -166,6 +166,7 @@ type raft struct {
 	commit  uint64 // Index of the most recent commit
 	applied uint64 // Index of the most recently applied commit
 
+	// 表示成为leader后，当同步的日志的idx > aflr时，会向aflrc发送信号，表示已经同步了初始的日志，可以开始处理后续的日志了
 	aflr  uint64        // Index when to signal initial messages have been applied after becoming leader. 0 means signaling is disabled.
 	aflrc chan struct{} // Channel used to signal leader has applied initial set of stored messages.
 
@@ -809,6 +810,7 @@ func (s *Server) transferRaftLeaders() bool {
 
 // Propose will propose a new entry to the group.
 // This should only be called on the leader.
+// Propose会提交一个新的entry到集群中，只有leader才能调用这个方法
 func (n *raft) Propose(data []byte) error {
 	if state := n.State(); state != Leader {
 		n.debug("Proposal ignored, not leader (state: %v)", state)
@@ -1520,6 +1522,7 @@ func (n *raft) selectNextLeader() string {
 }
 
 // StepDown will have a leader stepdown and optionally do a leader transfer.
+// 该方法会让当前节点主动放弃领导权，如果指定了新的领导者，会将领导权转移给新的领导者。
 func (n *raft) StepDown(preferred ...string) error {
 	n.Lock()
 
@@ -1528,6 +1531,7 @@ func (n *raft) StepDown(preferred ...string) error {
 		return errTooManyPrefs
 	}
 
+	// 如果当前节点不是领导者，直接返回
 	if n.State() != Leader {
 		n.Unlock()
 		return errNotLeader
@@ -1536,6 +1540,7 @@ func (n *raft) StepDown(preferred ...string) error {
 	n.debug("Being asked to stepdown")
 
 	// See if we have up to date followers.
+	// 判断参数中是否指定了新的领导者
 	maybeLeader := noLeader
 	if len(preferred) > 0 {
 		if preferred[0] != _EMPTY_ {
@@ -1546,6 +1551,7 @@ func (n *raft) StepDown(preferred ...string) error {
 	}
 
 	// Can't pick ourselves.
+	// 不能指定自己作为新的领导者
 	if maybeLeader == n.id {
 		maybeLeader = noLeader
 		preferred = nil
@@ -1554,10 +1560,12 @@ func (n *raft) StepDown(preferred ...string) error {
 	nowts := time.Now().UnixNano()
 
 	// If we have a preferred check it first.
+	// 如果指定了新的领导者，检查该节点是否健康
 	if maybeLeader != noLeader {
 		var isHealthy bool
 		if ps, ok := n.peers[maybeLeader]; ok {
 			si, ok := n.s.nodeToInfo.Load(maybeLeader)
+			// 该节点存在于peers中， 并且没有下线，并且最后一次心跳时间与当前时间的差值小于3个心跳间隔
 			isHealthy = ok && !si.(nodeInfo).offline && (nowts-ps.ts) < int64(hbInterval*3)
 		}
 		if !isHealthy {
@@ -1567,6 +1575,7 @@ func (n *raft) StepDown(preferred ...string) error {
 
 	// If we do not have a preferred at this point pick the first healthy one.
 	// Make sure not ourselves.
+	// 如果没有指定新的领导者，从peers中选择一个健康的节点作为新的领导者
 	if maybeLeader == noLeader {
 		for peer, ps := range n.peers {
 			if peer == n.id {
@@ -1595,6 +1604,7 @@ func (n *raft) StepDown(preferred ...string) error {
 	// Send the append entry directly rather than via the proposals queue,
 	// as we will switch to follower state immediately and will blow away
 	// the contents of the proposal queue in the process.
+	// 如果选出了新的领导者，将领导权转移给新的领导者，并发送AppendEntry消息，通知其他节点，当前节点已经放弃领导权
 	if maybeLeader != noLeader {
 		n.debug("Selected %q for new leader, stepping down due to leadership transfer", maybeLeader)
 		ae := newEntry(EntryLeaderTransfer, []byte(maybeLeader))
@@ -1621,6 +1631,7 @@ func randCampaignTimeout() time.Duration {
 
 // Campaign will have our node start a leadership vote.
 // Lock should be held.
+// campaign方法会让当前节点开始一次选举
 func (n *raft) campaign() error {
 	n.debug("Starting campaign")
 	if n.State() == Leader {
@@ -2218,7 +2229,7 @@ func (pe *proposedEntry) returnToPool() {
 type EntryType uint8
 
 const (
-	EntryNormal EntryType = iota
+	EntryNormal EntryType = iota // 普通消息
 	EntryOldSnapshot
 	EntryPeerState
 	EntryAddPeer
@@ -3181,6 +3192,7 @@ func (n *raft) catchupStalled() bool {
 // runs. It then creates a unique inbox for this catchup and subscribes
 // to it. The remote side will stream entries to that subject.
 // Lock should be held.
+// 此方法会创建一个新的catchupState，并且创建一个新的inbox，然后订阅这个inbox
 func (n *raft) createCatchup(ae *appendEntry) string {
 	// Cleanup any old ones.
 	if n.catchup != nil && n.catchup.sub != nil {
@@ -3401,8 +3413,10 @@ func (n *raft) processAppendEntry(ae *appendEntry, sub *subscription) {
 		n.updateLeadChange(false)
 	}
 
+	// 如果上次处理的任期和索引与当前的任期和索引不同，则有新的日志需要处理
 	if ae.pterm != n.pterm || ae.pindex != n.pindex {
 		// Check if this is a lower or equal index than what we were expecting.
+		// 如果索引小于等于我们的索引，则直接返回
 		if ae.pindex <= n.pindex {
 			n.debug("AppendEntry detected pindex less than/equal to ours: %d:%d vs %d:%d", ae.pterm, ae.pindex, n.pterm, n.pindex)
 			var ar *appendEntryResponse
@@ -3453,6 +3467,7 @@ func (n *raft) processAppendEntry(ae *appendEntry, sub *subscription) {
 		// Check if we are catching up. If we are here we know the leader did not have all of the entries
 		// so make sure this is a snapshot entry. If it is not start the catchup process again since it
 		// means we may have missed additional messages.
+		// 检查是否在追赶。如果我们在这里，我们知道领导者没有所有的条目，所以确保这是一个快照条目。如果不是，重新开始追赶过程，因为这意味着我们可能错过了其他消息。
 		if catchingUp {
 			// This means we already entered into a catchup state but what the leader sent us did not match what we expected.
 			// Snapshots and peerstate will always be together when a leader is catching us up in this fashion.
@@ -3990,6 +4005,7 @@ func (n *raft) setWriteErr(err error) {
 
 // writeTermVote will record the largest term and who we voted for to stable storage.
 // Lock should be held.
+// writeTermVote会持久化每个任期的投票情况
 func (n *raft) writeTermVote() {
 	var buf [termVoteLen]byte
 	var le = binary.LittleEndian
@@ -4312,6 +4328,8 @@ func (n *raft) switchToLeader() {
 }
 
 // Will signal that all messages that were not yet applied when becoming leader, have been applied since.
+// 会发出一个信号，表示在成为leader之前未同步的所有消息现在已经同步了
+// 触发时机 1. 成为leader 2. 成为leader后同步了消息
 func (n *raft) signalAppliedFloor() {
 	select {
 	case n.aflrc <- struct{}{}:

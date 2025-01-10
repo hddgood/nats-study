@@ -40,26 +40,40 @@ import (
 // JetStreamConfig determines this server's configuration.
 // MaxMemory and MaxStore are in bytes.
 type JetStreamConfig struct {
-	MaxMemory    int64         `json:"max_memory"`
-	MaxStore     int64         `json:"max_storage"`
-	StoreDir     string        `json:"store_dir,omitempty"`
+	// 当前服务配置的最大内存
+	MaxMemory int64 `json:"max_memory"`
+	// 当前服务配置的最大磁盘
+	MaxStore int64 `json:"max_storage"`
+	// 持久化目录
+	StoreDir string `json:"store_dir,omitempty"`
+	// 同步间隔
 	SyncInterval time.Duration `json:"sync_interval,omitempty"`
-	SyncAlways   bool          `json:"sync_always,omitempty"`
-	Domain       string        `json:"domain,omitempty"`
-	CompressOK   bool          `json:"compress_ok,omitempty"`
-	UniqueTag    string        `json:"unique_tag,omitempty"`
-	Strict       bool          `json:"strict,omitempty"`
+	// 是否总是同步
+	SyncAlways bool `json:"sync_always,omitempty"`
+	// 域
+	Domain string `json:"domain,omitempty"`
+	// 是否压缩
+	CompressOK bool `json:"compress_ok,omitempty"`
+	// 唯一标识
+	UniqueTag string `json:"unique_tag,omitempty"`
+	// 是否严格执行
+	Strict bool `json:"strict,omitempty"`
 }
 
 // Statistics about JetStream for this server.
 type JetStreamStats struct {
-	Memory         uint64            `json:"memory"`
-	Store          uint64            `json:"storage"`
-	ReservedMemory uint64            `json:"reserved_memory"`
-	ReservedStore  uint64            `json:"reserved_storage"`
-	Accounts       int               `json:"accounts"`
-	HAAssets       int               `json:"ha_assets"`
-	API            JetStreamAPIStats `json:"api"`
+	// 已使用的内存
+	Memory uint64 `json:"memory"`
+	// 已使用的磁盘空间
+	Store uint64 `json:"storage"`
+	// 预留的内存
+	ReservedMemory uint64 `json:"reserved_memory"`
+	// 预留的磁盘空间
+	ReservedStore uint64 `json:"reserved_storage"`
+	Accounts      int    `json:"accounts"`
+	// 高可用性（HA）资产的数量
+	HAAssets int               `json:"ha_assets"`
+	API      JetStreamAPIStats `json:"api"`
 }
 
 type JetStreamAccountLimits struct {
@@ -101,24 +115,37 @@ type JetStreamAPIStats struct {
 // This is for internal accounting for JetStream for this server.
 type jetStream struct {
 	// These are here first because of atomics on 32bit systems.
-	apiInflight   int64
-	apiTotal      int64
-	apiErrors     int64
-	memReserved   int64
+	// 当前正在处理的 API 请求数。这是一个原子变量，用于确保在多线程环境下的安全更新。
+	apiInflight int64
+	// 记录总的 API 请求数，包括成功和失败的请求数量。
+	apiTotal int64
+	// 记录 API 请求的错误总数。
+	apiErrors int64
+	// 已为 JetStream 分配的内存总量
+	memReserved int64
+	// 已为 JetStream 分配的磁盘存储总量
 	storeReserved int64
-	memUsed       int64
-	storeUsed     int64
-	queueLimit    int64
-	clustered     int32
-	mu            sync.RWMutex
-	srv           *Server
-	config        JetStreamConfig
-	cluster       *jetStreamCluster
-	accounts      map[string]*jsAccount
-	apiSubs       *Sublist
-	started       time.Time
+	// 已使用的内存
+	memUsed int64
+	// 已使用的磁盘
+	storeUsed int64
+	// 表示 JetStream 队列的限制，通常是消息队列的最大长度
+	queueLimit int64
+	// JetStream 是否运行在集群模式下 1/0 是/否
+	clustered int32
+	mu        sync.RWMutex
+	srv       *Server
+	// 配置
+	config JetStreamConfig
+	// JetStream 集群相关信息
+	cluster  *jetStreamCluster
+	accounts map[string]*jsAccount
+	apiSubs  *Sublist
+	// 启动时间
+	started time.Time
 
 	// System level request to purge a stream move
+	// 系统级别请求清除流
 	accountPurge *subscription
 
 	// Some bools regarding general state.
@@ -148,16 +175,21 @@ type jsaStorage struct {
 // an internal sub for a stream, so we will direct link to the stream
 // and walk backwards as needed vs multiple hash lookups and locks, etc.
 type jsAccount struct {
-	mu        sync.RWMutex
-	js        *jetStream
-	account   *Account
-	storeDir  string
-	inflight  sync.Map
+	mu sync.RWMutex
+	// 对应的jetStream
+	js       *jetStream
+	account  *Account
+	storeDir string
+	// 一个并发安全的映射，存储当前账户正在进行的操作
+	inflight sync.Map
+	// 一个映射，存储当前账户的流，string 为流的名称，*stream 为流的详细数据。
 	streams   map[string]*stream
 	templates map[string]*streamTemplate
-	store     TemplateStore
+	// 存储模版（一个接口） 提供store和delete方法 内存/磁盘
+	store TemplateStore
 
 	// From server
+	// 一个指向 IP 队列的指针，用于存储发布消息的队列
 	sendq *ipQueue[*pubMsg]
 
 	// For limiting only running one checkAndSync at a time.
@@ -195,6 +227,7 @@ func (s *Server) EnableJetStream(config *JetStreamConfig) error {
 	}
 
 	s.Noticef("Starting JetStream")
+	// 如果配置为空或者配置的最大内存和最大磁盘都小于等于0
 	if config == nil || config.MaxMemory <= 0 || config.MaxStore <= 0 {
 		var storeDir, domain, uniqueTag string
 		var maxStore, maxMem int64
@@ -202,6 +235,7 @@ func (s *Server) EnableJetStream(config *JetStreamConfig) error {
 			storeDir, domain, uniqueTag = config.StoreDir, config.Domain, config.UniqueTag
 			maxStore, maxMem = config.MaxStore, config.MaxMemory
 		}
+		// // 动态创建一个配置，使用基于tmp的目录（可重复）和系统内存的75％。
 		config = s.dynJetStreamConfig(storeDir, maxStore, maxMem)
 		if maxMem > 0 {
 			config.MaxMemory = maxMem
@@ -320,13 +354,16 @@ func (s *Server) decryptMeta(sc StoreCipher, ekey, buf []byte, acc, context stri
 func (s *Server) checkStoreDir(cfg *JetStreamConfig) error {
 	fis, _ := os.ReadDir(cfg.StoreDir)
 	// If we have nothing underneath us, could be just starting new, but if we see this we can check.
+	// 如果我们没有任何东西，可能是刚刚开始，但是如果我们看到这个，我们可以检查一下。
 	if len(fis) != 0 {
 		return nil
 	}
 	// Let's check the directory above. If it has us 'jetstream' but also other stuff that we can
 	// identify as accounts then we can fix.
+	// 检查上级目录，如果有我们的'jetstream'目录，但也有其他我们可以识别为账户的东西，那么我们可以修复。
 	fis, _ = os.ReadDir(filepath.Dir(cfg.StoreDir))
 	// If just one that is us 'jetstream' and all is ok.
+	// 如果只有一个jetstream目录，那么一切都没问题。
 	if len(fis) == 1 {
 		return nil
 	}
@@ -351,18 +388,21 @@ func (s *Server) checkStoreDir(cfg *JetStreamConfig) error {
 				// Account is not local but matches the NKEY account public key,
 				// this is enough indication to move this directory, no need to
 				// fetch the account.
+				// 账户不是本地的，但与 NKEY 账户公钥匹配，这足以表明要移动此目录，无需获取账户。
 				ok = true
 			}
 			// If this seems to be an account go ahead and move the directory. This will include all assets
 			// like streams and consumers.
 			if ok {
 				if !haveJetstreamDir {
+					// 创建jetstream目录
 					err := os.Mkdir(filepath.Join(filepath.Dir(cfg.StoreDir), JetStreamStoreDir), defaultDirPerms)
 					if err != nil {
 						return err
 					}
 					haveJetstreamDir = true
 				}
+				// 移动目录
 				old := filepath.Join(filepath.Dir(cfg.StoreDir), fi.Name())
 				new := filepath.Join(cfg.StoreDir, fi.Name())
 				s.Noticef("JetStream relocated account %q to %q", old, new)
@@ -411,33 +451,41 @@ func (s *Server) initJetStreamEncryption() (err error) {
 }
 
 // enableJetStream will start up the JetStream subsystem.
+// enableJetStream方法会启动JetStream子系统。
 func (s *Server) enableJetStream(cfg JetStreamConfig) error {
 	js := &jetStream{srv: s, config: cfg, accounts: make(map[string]*jsAccount), apiSubs: NewSublistNoCache()}
 	s.gcbMu.Lock()
+	// 配置最大可消费的字节数 gcbOutMax
 	if s.gcbOutMax = s.getOpts().JetStreamMaxCatchup; s.gcbOutMax == 0 {
 		s.gcbOutMax = defaultMaxTotalCatchupOutBytes
 	}
 	s.gcbMu.Unlock()
 
 	// TODO: Not currently reloadable.
+	// 初始化队列限制
 	atomic.StoreInt64(&js.queueLimit, s.getOpts().JetStreamRequestQueueLimit)
-
+	// 原子性的设置JetStream
 	s.js.Store(js)
 
 	// FIXME(dlc) - Allow memory only operation?
+	// 检查存储目录是否存在
 	if stat, err := os.Stat(cfg.StoreDir); os.IsNotExist(err) {
+		// 不存在则创建
 		if err := os.MkdirAll(cfg.StoreDir, defaultDirPerms); err != nil {
 			return fmt.Errorf("could not create storage directory - %v", err)
 		}
 	} else {
+		// 如果存在则检查是否是目录并且是否有写权限
 		// Make sure its a directory and that we can write to it.
 		if stat == nil || !stat.IsDir() {
 			return fmt.Errorf("storage directory is not a directory")
 		}
+		// 创建一个临时文件，检查是否有写权限
 		tmpfile, err := os.CreateTemp(cfg.StoreDir, "_test_")
 		if err != nil {
 			return fmt.Errorf("storage directory is not writable")
 		}
+		// 关闭临时文件并删除
 		tmpfile.Close()
 		os.Remove(tmpfile.Name())
 	}
@@ -553,6 +601,7 @@ func (s *Server) updateJetStreamInfoStatus(enabled bool) {
 }
 
 // restartJetStream will try to re-enable JetStream during a reload if it had been disabled during runtime.
+// 重启JetStream将尝试在重新加载期间重新启用JetStream，如果在运行时已禁用。
 func (s *Server) restartJetStream() error {
 	opts := s.getOpts()
 	cfg := JetStreamConfig{
@@ -640,6 +689,7 @@ func (s *Server) handleOutOfSpace(mset *stream) {
 
 // DisableJetStream will turn off JetStream and signals in clustered mode
 // to have the metacontroller remove us from the peer list.
+// DisableJetStream将关闭JetStream，并在集群模式下发出信号，要求元控制器将我们从对等列表中删除。
 func (s *Server) DisableJetStream() error {
 	if !s.JetStreamEnabled() {
 		return nil
@@ -861,12 +911,14 @@ func (s *Server) configAllJetStreamAccounts() error {
 }
 
 // Mark our started time.
+// 标记我们的启动时间。
 func (js *jetStream) setStarted() {
 	js.mu.Lock()
 	defer js.mu.Unlock()
 	js.started = time.Now()
 }
 
+// 是否启用JetStream
 func (js *jetStream) isEnabled() bool {
 	if js == nil {
 		return false
@@ -875,6 +927,7 @@ func (js *jetStream) isEnabled() bool {
 }
 
 // Mark that we will be in standlone mode.
+// 标记我们将处于独立模式。
 func (js *jetStream) setJetStreamStandAlone(isStandAlone bool) {
 	if js == nil {
 		return
@@ -896,6 +949,7 @@ func (s *Server) JetStreamEnabled() bool {
 }
 
 // JetStreamEnabledForDomain will report if any servers have JetStream enabled within this domain.
+// 会判断是否在此域中启用了JetStream。
 func (s *Server) JetStreamEnabledForDomain() bool {
 	if s.JetStreamEnabled() {
 		return true
@@ -917,6 +971,7 @@ func (s *Server) JetStreamEnabledForDomain() bool {
 }
 
 // Will signal that all pull requests for consumers on this server are now invalid.
+// 会发出信号，表明此服务器上所有消费者的拉取请求现在无效。（关闭时调用）
 func (s *Server) signalPullConsumers() {
 	js := s.getJetStream()
 	if js == nil {
@@ -964,6 +1019,7 @@ func (js *jetStream) isShuttingDown() bool {
 }
 
 // Shutdown jetstream for this server.
+// 关闭此服务器的JetStream。
 func (s *Server) shutdownJetStream() {
 	js := s.getJetStream()
 	if js == nil {
@@ -1045,6 +1101,7 @@ func (s *Server) shutdownJetStream() {
 
 // JetStreamConfig will return the current config. Useful if the system
 // created a dynamic configuration. A copy is returned.
+// 返回一个被复制的JetStream配置。
 func (s *Server) JetStreamConfig() *JetStreamConfig {
 	var c *JetStreamConfig
 	if js := s.getJetStream(); js != nil {
@@ -1097,6 +1154,7 @@ func (a *Account) assignJetStreamLimits(limits map[string]JetStreamAccountLimits
 
 // EnableJetStream will enable JetStream on this account with the defined limits.
 // This is a helper for JetStreamEnableAccount.
+// 启动此账户上的JetStream，并设置定义的限制。
 func (a *Account) EnableJetStream(limits map[string]JetStreamAccountLimits) error {
 	a.mu.RLock()
 	s := a.srv

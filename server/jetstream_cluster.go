@@ -108,9 +108,11 @@ const (
 	// Update Stream.
 	updateStreamOp
 	// For updating information on pending pull requests.
+	// 用于更新pending pull请求的信息
 	addPendingRequest
 	removePendingRequest
 	// For sending compressed streams, either through RAFT or catchup.
+	// 用于发送压缩流，通过RAFT或catchup
 	compressedStreamMsgOp
 	// For sending deleted gaps on catchups for replicas.
 	deleteRangeOp
@@ -2360,6 +2362,7 @@ func (mset *stream) waitOnConsumerAssignments() {
 }
 
 // Monitor our stream node for this stream.
+// 监控流节点
 func (js *jetStream) monitorStream(mset *stream, sa *streamAssignment, sendSnapshot bool) {
 	s, cc := js.server(), js.cluster
 	defer s.grWG.Done()
@@ -2543,6 +2546,7 @@ func (js *jetStream) monitorStream(mset *stream, sa *streamAssignment, sendSnaps
 		select {
 		case <-s.quitCh:
 			// Server shutting down, but we might receive this before qch, so try to snapshot.
+			// 如果server正在关闭，但是还没有收到qch的信号，则尝试快照
 			doSnapshot()
 			return
 		case <-mqch:
@@ -3039,6 +3043,7 @@ func isControlHdr(hdr []byte) bool {
 
 // Apply our stream entries.
 func (js *jetStream) applyStreamEntries(mset *stream, ce *CommittedEntry, isRecovering bool) error {
+	// 此方法用于处理raft集群中的消息
 	for _, e := range ce.Entries {
 		if e.Type == EntryNormal {
 			buf, op := e.Data, entryOp(e.Data[0])
@@ -3048,8 +3053,9 @@ func (js *jetStream) applyStreamEntries(mset *stream, ce *CommittedEntry, isReco
 					continue
 				}
 				s := js.srv
-
+				// 第一位是op，所以从第二位开始
 				mbuf := buf[1:]
+				// 如果消息是压缩的，则解压缩
 				if op == compressedStreamMsgOp {
 					var err error
 					mbuf, err = s2.Decode(nil, mbuf)
@@ -3057,7 +3063,7 @@ func (js *jetStream) applyStreamEntries(mset *stream, ce *CommittedEntry, isReco
 						panic(err.Error())
 					}
 				}
-
+				// 解码消息
 				subject, reply, hdr, msg, lseq, ts, err := decodeStreamMsg(mbuf)
 				if err != nil {
 					if node := mset.raftNode(); node != nil {
@@ -3068,6 +3074,7 @@ func (js *jetStream) applyStreamEntries(mset *stream, ce *CommittedEntry, isReco
 				}
 
 				// Check for flowcontrol here.
+				// 流量控制
 				if len(msg) == 0 && len(hdr) > 0 && reply != _EMPTY_ && isControlHdr(hdr) {
 					if !isRecovering {
 						mset.sendFlowControlReply(reply)
@@ -3076,9 +3083,11 @@ func (js *jetStream) applyStreamEntries(mset *stream, ce *CommittedEntry, isReco
 				}
 
 				// Grab last sequence and CLFS.
+				// 获得当前节点最后一条消息的序列号和CLFS
 				last, clfs := mset.lastSeqAndCLFS()
 
 				// We can skip if we know this is less than what we already have.
+				// 如果当前消息的序列号 < last + clfs，则跳过
 				if lseq-clfs < last {
 					s.Debugf("Apply stream entries for '%s > %s' skipping message with sequence %d with last of %d",
 						mset.account(), mset.name(), lseq+1-clfs, last)
@@ -3092,11 +3101,13 @@ func (js *jetStream) applyStreamEntries(mset *stream, ce *CommittedEntry, isReco
 				// Skip by hand here since first msg special case.
 				// Reason is sequence is unsigned and for lseq being 0
 				// the lseq under stream would have to be -1.
+				// 处理日志重放时的保护机制
 				if lseq == 0 && last != 0 {
 					continue
 				}
 
 				// Messages to be skipped have no subject or timestamp or msg or hdr.
+				// 如果消息没有主题、时间戳、消息体和头，则跳过
 				if subject == _EMPTY_ && ts == 0 && len(msg) == 0 && len(hdr) == 0 {
 					// Skip and update our lseq.
 					last := mset.store.SkipMsg()
@@ -3113,6 +3124,7 @@ func (js *jetStream) applyStreamEntries(mset *stream, ce *CommittedEntry, isReco
 					mt = mset.getAndDeleteMsgTrace(lseq)
 				}
 				// Process the actual message here.
+				// 处理实际的消息
 				err = mset.processJetStreamMsg(subject, reply, hdr, msg, lseq, ts, mt)
 
 				// If we have inflight make sure to clear after processing.
@@ -3125,10 +3137,13 @@ func (js *jetStream) applyStreamEntries(mset *stream, ce *CommittedEntry, isReco
 				}
 
 				// Clear expected per subject state after processing.
+				// 处理完消息后，清除expectedPerSubjectSequence中的信息
 				if mset.expectedPerSubjectSequence != nil {
 					mset.clMu.Lock()
 					if subj, found := mset.expectedPerSubjectSequence[lseq]; found {
+						// 删除序列号对应的主题
 						delete(mset.expectedPerSubjectSequence, lseq)
+						// 删除正在处理的主题 key:subject value:struct{}
 						delete(mset.expectedPerSubjectInProcess, subj)
 					}
 					mset.clMu.Unlock()
@@ -3529,6 +3544,7 @@ func (s *Server) sendStreamLeaderElectAdvisory(mset *stream) {
 
 // Will lookup a stream assignment.
 // Lock should be held.
+// 会查找一个流分配。
 func (js *jetStream) streamAssignment(account, stream string) (sa *streamAssignment) {
 	cc := js.cluster
 	if cc == nil {
@@ -7997,12 +8013,17 @@ func (mset *stream) checkAllowMsgCompress(peers []string) {
 const streamLagWarnThreshold = 10_000
 
 // processClusteredInboundMsg will propose the inbound message to the underlying raft group.
+// 此方法会将消息提交到raft集群中
 func (mset *stream) processClusteredInboundMsg(subject, reply string, hdr, msg []byte, mt *msgTrace) (retErr error) {
+	fmt.Println("processClusteredInboundMsg param subject:", subject, "reply:", reply, "hdr:", hdr, "msg:", msg, "mt:", mt)
 	// For possible error response.
 	var response []byte
 
+	// 读锁
 	mset.mu.RLock()
+	// 是否可以响应
 	canRespond := !mset.cfg.NoAck && len(reply) > 0
+	// 读取配置
 	name, stype, store := mset.cfg.Name, mset.cfg.Storage, mset.store
 	s, js, jsa, st, r, tierName, outq, node := mset.srv, mset.js, mset.jsa, mset.cfg.Storage, mset.cfg.Replicas, mset.tier, mset.outq, mset.node
 	maxMsgSize, lseq := int(mset.cfg.MaxMsgSize), mset.lseq
@@ -8015,6 +8036,7 @@ func (mset *stream) processClusteredInboundMsg(subject, reply string, hdr, msg [
 	// We also invoke this in clustering mode for message tracing when not
 	// performing message delivery.
 	if node == nil || mt.traceOnly() {
+		// 如果没有raft节点或者只是用于消息追踪，则直接返回
 		return mset.processJetStreamMsg(subject, reply, hdr, msg, 0, 0, mt)
 	}
 
@@ -8031,11 +8053,13 @@ func (mset *stream) processClusteredInboundMsg(subject, reply string, hdr, msg [
 	}
 
 	// Check that we are the leader. This can be false if we have scaled up from an R1 that had inbound queued messages.
+	// 判断是否是leader，如果不是leader，则返回错误
 	if !isLeader {
 		return NewJSClusterNotLeaderError()
 	}
 
 	// Bail here if sealed.
+	// 如果stream已经被封存，则返回错误
 	if isSealed {
 		var resp = JSPubAckResponse{PubAck: &PubAck{Stream: mset.name()}, Error: NewJSStreamSealedError()}
 		b, _ := json.Marshal(resp)
@@ -8044,6 +8068,7 @@ func (mset *stream) processClusteredInboundMsg(subject, reply string, hdr, msg [
 	}
 
 	// Check here pre-emptively if we have exceeded this server limits.
+	// 提前检查在存储方面是否超过了限制（内存/磁盘）
 	if js.limitsExceeded(stype) {
 		s.resourcesExceededError()
 		if canRespond {
@@ -8087,9 +8112,11 @@ func (mset *stream) processClusteredInboundMsg(subject, reply string, hdr, msg [
 
 	// Some header checks can be checked pre proposal. Most can not.
 	var msgId string
+	// 检查消息头
 	if len(hdr) > 0 {
 		// Since we encode header len as u16 make sure we do not exceed.
 		// Again this works if it goes through but better to be pre-emptive.
+		//
 		if len(hdr) > math.MaxUint16 {
 			err := fmt.Errorf("JetStream header size exceeds limits for '%s > %s'", jsa.acc().Name, mset.cfg.Name)
 			s.RateLimitWarnf("%s", err.Error())
@@ -8114,14 +8141,18 @@ func (mset *stream) processClusteredInboundMsg(subject, reply string, hdr, msg [
 		}
 		// Check for MsgIds here at the cluster level to avoid excessive CLFS accounting.
 		// Will help during restarts.
+		// 这段代码主要用于检查消息ID是否重复,以避免重复消息的处理
 		if msgId = getMsgId(hdr); msgId != _EMPTY_ {
 			mset.mu.Lock()
+			// 检查消息ID是否已存在
 			if dde := mset.checkMsgId(msgId); dde != nil {
 				var buf [256]byte
 				pubAck := append(buf[:0], mset.pubAck...)
 				seq := dde.seq
 				mset.mu.Unlock()
-				// Should not return an invalid sequence, in that case timeout.
+				// 如果消息ID重复,根据序列号返回不同的响应
+				// 如果序列号>0,返回重复消息的序列号
+				// 如果序列号=0,返回重复消息冲突错误
 				if canRespond {
 					if seq > 0 {
 						response := append(pubAck, strconv.FormatUint(seq, 10)...)
@@ -8138,6 +8169,8 @@ func (mset *stream) processClusteredInboundMsg(subject, reply string, hdr, msg [
 			}
 			// FIXME(dlc) - locking conflict with accessing mset.clseq
 			// For now we stage with zero, and will update in processStreamMsg.
+			// 如果消息ID不重复,则存储消息ID信息
+			// 暂时将序列号设为0,后续在processStreamMsg中更新
 			mset.storeMsgIdLocked(&ddentry{msgId, 0, time.Now().UnixNano()})
 			mset.mu.Unlock()
 		}
@@ -8147,10 +8180,16 @@ func (mset *stream) processClusteredInboundMsg(subject, reply string, hdr, msg [
 
 	// We only use mset.clseq for clustering and in case we run ahead of actual commits.
 	// Check if we need to set initial value here
+	// clseq 是集群中的消息序列号，确保提交的消息顺序
+	// lseq 是上次处理的消息序列号
+	// clfs 是集群日志的失败计数
+	// 处理逻辑：检查是否需要设置初始值
 	mset.clMu.Lock()
 	if mset.clseq == 0 || mset.clseq < lseq+mset.clfs {
 		// Re-capture
+		// 重新捕获最新的消息序列号
 		lseq = mset.lastSeq()
+		// 设置集群序列号为最新序列号加上失败序列号
 		mset.clseq = lseq + mset.clfs
 	}
 
@@ -8158,8 +8197,14 @@ func (mset *stream) processClusteredInboundMsg(subject, reply string, hdr, msg [
 	// We need to deny here otherwise it could succeed on some peers and not others
 	// depending on consumer ack state. So we deny here, if we allow that means we know
 	// it would succeed on every peer.
+	// 我们需要在这里检查是否设置了除了 LimitsPolicy 之外的策略（总共三种策略），并且
+	// 丢弃策略为 DiscardNew，并且设置了最大消息数或字节数。
+	// 我们需要在这里拒绝，否则它可能在某些节点上成功而在其他节点上失败，
+	// 这取决于消费者的确认状态。因此，我们在这里拒绝，如果我们允许，
+	// 那意味着我们知道它会在每个节点上成功。
 	if interestPolicy && discard == DiscardNew && (maxMsgs > 0 || maxBytes > 0) {
 		// Track inflight.
+		// inflight 是一个map，用于存储消息的大小，记录正在处理的每条消息的序列号和消息大小，{seq:msgSize}
 		if mset.inflight == nil {
 			mset.inflight = make(map[uint64]uint64)
 		}
@@ -8170,12 +8215,15 @@ func (mset *stream) processClusteredInboundMsg(subject, reply string, hdr, msg [
 		}
 
 		var state StreamState
+		// 将当前存储的状态填充到state中 1. 加锁，保证一致性 2. 仅填充部分变量 3. 重用一存在结构体
 		mset.store.FastState(&state)
 
 		var err error
+		// 如果设置了最大消息数，并且当前消息数加上inflight的消息数大于最大消息数，则返回错误
 		if maxMsgs > 0 && state.Msgs+uint64(len(mset.inflight)) > uint64(maxMsgs) {
 			err = ErrMaxMsgs
 		} else if maxBytes > 0 {
+			// 如果设置了最大字节数，并且当前字节数加上inflight中的所有消息字节数大于最大字节数，则返回错误
 			// TODO(dlc) - Could track this rollup independently.
 			var bytesPending uint64
 			for _, nb := range mset.inflight {
@@ -8185,6 +8233,7 @@ func (mset *stream) processClusteredInboundMsg(subject, reply string, hdr, msg [
 				err = ErrMaxBytes
 			}
 		}
+		// 如果错误不为空，则删除inflight中的消息，并返回错误
 		if err != nil {
 			delete(mset.inflight, mset.clseq)
 			mset.clMu.Unlock()
@@ -8200,8 +8249,10 @@ func (mset *stream) processClusteredInboundMsg(subject, reply string, hdr, msg [
 
 	if len(hdr) > 0 {
 		// Expected last sequence per subject.
+		// 获取消息头中的期望的最后序列号
 		if seq, exists := getExpectedLastSeqPerSubject(hdr); exists && store != nil {
 			// Wait for initial stored but not applied messages to be applied, ensuring consistency before allowing updates.
+			// 表示作为leader，在成为leader并且完成所有消息的同步时，没有ready表示还未准备好
 			if !mset.expectedPerSubjectReady {
 				// Could have set inflight above, cleanup here.
 				delete(mset.inflight, mset.clseq)
@@ -8217,12 +8268,14 @@ func (mset *stream) processClusteredInboundMsg(subject, reply string, hdr, msg [
 			}
 
 			// Allow override of the subject used for the check.
+			// 判断消息头中是否设置了期望的序列号对应的主题
 			seqSubj := subject
 			if optSubj := getExpectedLastSeqPerSubjectForSubject(hdr); optSubj != _EMPTY_ {
 				seqSubj = optSubj
 			}
 
 			// If subject is already in process, block as otherwise we could have multiple messages inflight with same subject.
+			// 如果对应的subject还有消息未处理完，则阻塞，否则可能会有多个消息正在处理同一个subject
 			if _, found := mset.expectedPerSubjectInProcess[seqSubj]; found {
 				// Could have set inflight above, cleanup here.
 				delete(mset.inflight, mset.clseq)
@@ -8239,13 +8292,16 @@ func (mset *stream) processClusteredInboundMsg(subject, reply string, hdr, msg [
 
 			var smv StoreMsg
 			var fseq uint64
+			// 从store中加载最后一条消息
 			sm, err := store.LoadLastMsg(seqSubj, &smv)
 			if sm != nil {
 				fseq = sm.seq
 			}
+			// 如果当前存储中没有消息，则设置fseq为0
 			if err == ErrStoreMsgNotFound && seq == 0 {
 				fseq, err = 0, nil
 			}
+			// 如果错误不为空，或者fseq不等于seq，则返回错误
 			if err != nil || fseq != seq {
 				// Could have set inflight above, cleanup here.
 				delete(mset.inflight, mset.clseq)
@@ -8267,11 +8323,14 @@ func (mset *stream) processClusteredInboundMsg(subject, reply string, hdr, msg [
 			if mset.expectedPerSubjectInProcess == nil {
 				mset.expectedPerSubjectInProcess = make(map[string]struct{})
 			}
+			// 记录正在处理的消息的序列号对应的主题
 			mset.expectedPerSubjectSequence[mset.clseq] = seqSubj
+			// 将该subject标记为正在处理
 			mset.expectedPerSubjectInProcess[seqSubj] = struct{}{}
 		}
 	}
 
+	// 对消息进行编码
 	esm := encodeStreamMsgAllowCompress(subject, reply, hdr, msg, mset.clseq, time.Now().UnixNano(), compressOK)
 	var mtKey uint64
 	if mt != nil {
@@ -8283,13 +8342,16 @@ func (mset *stream) processClusteredInboundMsg(subject, reply string, hdr, msg [
 	}
 
 	// Do proposal.
+	// 向其他节点进行同步(raft)
 	err := node.Propose(esm)
 	if err == nil {
+		// 当前消息序列号+1
 		mset.clseq++
 	}
 
 	// Check to see if we are being overrun.
 	// TODO(dlc) - Make this a limit where we drop messages to protect ourselves, but allow to be configured.
+	// 检查是否被超载
 	if mset.clseq-(lseq+mset.clfs) > streamLagWarnThreshold {
 		lerr := fmt.Errorf("JetStream stream '%s > %s' has high message lag", jsa.acc().Name, name)
 		s.RateLimitWarnf("%s", lerr.Error())
