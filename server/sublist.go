@@ -63,6 +63,7 @@ type SublistResult struct {
 }
 
 // A Sublist stores and efficiently retrieves subscriptions.
+// 这个结构体用于存储和高效检索订阅
 type Sublist struct {
 	sync.RWMutex
 	genid     uint64

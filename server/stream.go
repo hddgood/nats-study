@@ -267,7 +267,7 @@ const (
 // Stream is a jetstream stream of messages. When we receive a message internally destined
 // for a Stream we will direct link from the client to this structure.
 type stream struct {
-	mu     sync.RWMutex // Read/write lock for the stream.
+	mu     sync.RWMutex // Read/write lock for the stream. 这个锁用于保护stream的并发访问
 	js     *jetStream   // The internal *jetStream for the account.
 	jsa    *jsAccount   // The JetStream account-level information.
 	acc    *Account     // The account this stream is defined in.
@@ -327,7 +327,7 @@ type stream struct {
 	clsMu sync.RWMutex
 	cList []*consumer     // Consumer list.
 	sch   chan struct{}   // Channel to signal consumers.
-	sigq  *ipQueue[*cMsg] // Intra-process queue for the messages to signal to the consumers.
+	sigq  *ipQueue[*cMsg] // Intra-process queue for the messages to signal to the consumers. 这个队列用于将消息传递给消费者
 	csl   *Sublist        // Consumer subscription list.
 
 	// Leader will store seq/msgTrace in clustering mode. Used in applyStreamEntries
@@ -5231,6 +5231,7 @@ func (m *cMsg) returnToPool() {
 
 // Go routine to signal consumers.
 // Offloaded from stream msg processing.
+// 这个方法会从stream的sigq中获取消息，然后发送给消费者
 func (mset *stream) signalConsumersLoop() {
 	mset.mu.RLock()
 	s, qch, sch, msgs := mset.srv, mset.qch, mset.sch, mset.sigq
