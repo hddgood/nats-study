@@ -24,9 +24,9 @@ import (
 type parserState int
 type parseState struct {
 	state   parserState
-	op      byte
+	op      byte // 每条消息的第一个字节
 	as      int
-	drop    int
+	drop    int // 丢弃字节数
 	pa      pubArg
 	argBuf  []byte
 	msgBuf  []byte
@@ -152,12 +152,15 @@ func (c *client) parse(buf []byte) error {
 	c.mu.Unlock()
 
 	// Move to loop instead of range syntax to allow jumping of i
+	// 开始逐个字节处理 每个字节的处理会改变c.state（状态机）
 	for i = 0; i < len(buf); i++ {
 		b = buf[i]
 
 		switch c.state {
 		case OP_START:
+			// 表示开始状态
 			c.op = b
+			// 只要不是CONNECT，就要进行身份认证
 			if b != 'C' && b != 'c' {
 				if authSet {
 					if s == nil {
@@ -191,6 +194,7 @@ func (c *client) parse(buf []byte) error {
 					goto authErr
 				}
 			}
+			// 根据当前字节b，设置状态机状态
 			switch b {
 			case 'P', 'p':
 				c.state = OP_P
@@ -230,6 +234,7 @@ func (c *client) parse(buf []byte) error {
 				goto parseErr
 			}
 		case OP_H:
+			// 处理H命令
 			switch b {
 			case 'P', 'p':
 				c.state = OP_HP
@@ -239,6 +244,7 @@ func (c *client) parse(buf []byte) error {
 				goto parseErr
 			}
 		case OP_HP:
+			// 处理HP命令
 			switch b {
 			case 'U', 'u':
 				c.state = OP_HPU
@@ -246,6 +252,7 @@ func (c *client) parse(buf []byte) error {
 				goto parseErr
 			}
 		case OP_HPU:
+			// 处理HPU命令
 			switch b {
 			case 'B', 'b':
 				c.state = OP_HPUB
@@ -253,6 +260,7 @@ func (c *client) parse(buf []byte) error {
 				goto parseErr
 			}
 		case OP_HPUB:
+			// 处理HPUB命令
 			switch b {
 			case ' ', '\t':
 				c.state = OP_HPUB_SPC
@@ -260,19 +268,23 @@ func (c *client) parse(buf []byte) error {
 				goto parseErr
 			}
 		case OP_HPUB_SPC:
+			// 处理HPUB_SPC命令
 			switch b {
 			case ' ', '\t':
 				continue
 			default:
+				// 开始处理HPUB的参数
 				c.pa.hdr = 0
 				c.state = HPUB_ARG
 				c.as = i
 			}
 		case HPUB_ARG:
+			// 处理HPUB的参数
 			switch b {
 			case '\r':
 				c.drop = 1
 			case '\n':
+				// 一行arg解析完成
 				var arg []byte
 				if c.argBuf != nil {
 					arg = c.argBuf
@@ -280,6 +292,7 @@ func (c *client) parse(buf []byte) error {
 				} else {
 					arg = buf[c.as : i-c.drop]
 				}
+				// 检查是否超过最大控制行限制
 				if err := c.overMaxControlLineLimit(arg, mcl); err != nil {
 					return err
 				}
@@ -302,6 +315,7 @@ func (c *client) parse(buf []byte) error {
 					i = c.as + c.pa.size - LEN_CR_LF
 				}
 			default:
+				// 如果有缓冲区，则将当前字节b追加到缓冲区
 				if c.argBuf != nil {
 					c.argBuf = append(c.argBuf, b)
 				}
@@ -506,10 +520,11 @@ func (c *client) parse(buf []byte) error {
 			if trace {
 				c.traceMsg(c.msgBuf)
 			}
-
+			// 处理一条具体消息
 			c.processInboundMsg(c.msgBuf)
 
 			mt.sendEvent()
+			// 重置状态
 			c.argBuf, c.msgBuf, c.header = nil, nil, nil
 			c.drop, c.as, c.state = 0, i+1, OP_START
 			// Drop all pub args

@@ -63,19 +63,18 @@ type SublistResult struct {
 }
 
 // A Sublist stores and efficiently retrieves subscriptions.
-// 这个结构体用于存储和高效检索订阅
 type Sublist struct {
 	sync.RWMutex
-	genid     uint64
-	matches   uint64
-	cacheHits uint64
-	inserts   uint64
-	removes   uint64
-	root      *level
-	cache     map[string]*SublistResult
-	ccSweep   int32
-	notify    *notifyMaps
-	count     uint32
+	genid     uint64                    // 全局唯一标识符
+	matches   uint64                    // 记录匹配次数
+	cacheHits uint64                    // 缓存命中次数
+	inserts   uint64                    // 记录插入次数
+	removes   uint64                    // 记录删除次数
+	root      *level                    // 根节点
+	cache     map[string]*SublistResult // 缓存
+	ccSweep   int32                     // 缓存清理标志
+	notify    *notifyMaps               // 通知
+	count     uint32                    // 订阅数量
 }
 
 // notifyMaps holds maps of arrays of channels for notifications

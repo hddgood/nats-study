@@ -3921,12 +3921,17 @@ var clientNRGPrefix = []byte("$NRG.")
 // processInboundClientMsg is called to process an inbound msg from a client.
 // Return if the message was delivered, and if the message was not delivered
 // due to a permission issue.
+// 这个方法会处理客户端的入站消息，并返回消息是否被传递，以及消息是否由于权限问题未被传递。
 func (c *client) processInboundClientMsg(msg []byte) (bool, bool) {
 	// Update statistics
 	// The msg includes the CR_LF, so pull back out for accounting.
+	// 更新统计信息
+	// 消息数量 + 1
 	c.in.msgs++
+	// 当前消息总字节数
 	c.in.bytes += int32(len(msg) - LEN_CR_LF)
 
+	// 检查客户端是否在尝试发布保留的 "$GNR" 前缀的消息
 	// Check that client (could be here with SYSTEM) is not publishing on reserved "$GNR" prefix.
 	if c.kind == CLIENT && hasGWRoutedReplyPrefix(c.pa.subject) {
 		c.pubPermissionViolation(c.pa.subject)
@@ -3943,6 +3948,8 @@ func (c *client) processInboundClientMsg(msg []byte) (bool, bool) {
 	genidAddr := &acc.sl.genid
 
 	// Check pub permissions
+	// 检查发布权限
+	// perms 权限配置
 	if c.perms != nil && (c.perms.pub.allow != nil || c.perms.pub.deny != nil) && !c.pubAllowedFullCheck(string(c.pa.subject), true, true) {
 		c.mu.Unlock()
 		c.pubPermissionViolation(c.pa.subject)
