@@ -26,7 +26,7 @@ type ipQueue[T any] struct {
 	inprogress int64
 	sync.Mutex
 	ch   chan struct{}
-	elts []T
+	elts []T // 当前队列中的元素
 	pos  int
 	pool *sync.Pool
 	sz   uint64 // Calculated size (only if calc != nil)
@@ -36,10 +36,10 @@ type ipQueue[T any] struct {
 }
 
 type ipQueueOpts[T any] struct {
-	mrs  int              // Max recycle size
-	calc func(e T) uint64 // Calc function for tracking size
-	msz  uint64           // Limit by total calculated size
-	mlen int              // Limit by number of entries
+	mrs  int              // Max recycle size  最大回收大小
+	calc func(e T) uint64 // Calc function for tracking size 计算元素大小
+	msz  uint64           // Limit by total calculated size 限制总大小
+	mlen int              // Limit by number of entries 限制元素数量
 }
 
 type ipQueueOpt[T any] func(*ipQueueOpts[T])
@@ -110,13 +110,17 @@ func newIPQueue[T any](s *Server, name string, opts ...ipQueueOpt[T]) *ipQueue[T
 // Add the element `e` to the queue, notifying the queue channel's `ch` if the
 // entry is the first to be added, and returns the length of the queue after
 // this element is added.
+// 将元素 `e` 添加到队列中，如果这是第一个添加的元素，则通知队列通道的 `ch`，并返回添加元素后的队列长度。
 func (q *ipQueue[T]) push(e T) (int, error) {
 	q.Lock()
+	// 当前队列长度
 	l := len(q.elts) - q.pos
+	// 如果设置了最大长度，并且当前队列长度等于最大长度，则返回错误
 	if q.mlen > 0 && l == q.mlen {
 		q.Unlock()
 		return l, errIPQLenLimitReached
 	}
+	// 如果设置了最大大小，并且当前队列大小加上新元素的大小大于最大大小，则返回错误
 	if q.calc != nil {
 		sz := q.calc(e)
 		if q.msz > 0 && q.sz+sz > q.msz {
@@ -125,18 +129,22 @@ func (q *ipQueue[T]) push(e T) (int, error) {
 		}
 		q.sz += sz
 	}
+	// 如果是空队列，则从池中获取一个新队列
 	if q.elts == nil {
 		// What comes out of the pool is already of size 0, so no need for [:0].
 		q.elts = *(q.pool.Get().(*[]T))
 	}
+	// 将新元素添加到队列中
 	q.elts = append(q.elts, e)
 	q.Unlock()
+	// 如果这是第一个添加的元素，则通知队列通道的 `ch`
 	if l == 0 {
 		select {
 		case q.ch <- struct{}{}:
 		default:
 		}
 	}
+	// 返回添加元素后的队列长度
 	return l + 1, nil
 }
 
@@ -149,24 +157,33 @@ func (q *ipQueue[T]) push(e T) (int, error) {
 // something, but by the time it calls `pop()`, the drain() would have
 // emptied the queue. So the caller should never assume that pop() will
 // return a slice of 1 or more, it could return `nil`.
+// 返回当前队列中的所有元素，清空队列。
 func (q *ipQueue[T]) pop() []T {
 	if q == nil {
 		return nil
 	}
+	// 加锁
 	q.Lock()
+	// 如果当前队列长度为0，则解锁并返回nil
 	if len(q.elts)-q.pos == 0 {
 		q.Unlock()
 		return nil
 	}
 	var elts []T
+	// 如果pos为0，则elts为当前队列中的所有元素
 	if q.pos == 0 {
 		elts = q.elts
 	} else {
+		// 否则，elts为当前队列中从pos开始的所有元素
 		elts = q.elts[q.pos:]
 	}
+	// 清空队列
 	q.elts, q.pos, q.sz = nil, 0, 0
+	// 增加inprogress计数
 	atomic.AddInt64(&q.inprogress, int64(len(elts)))
+	// 解锁
 	q.Unlock()
+	// 返回elts
 	return elts
 }
 
@@ -178,27 +195,36 @@ func (q *ipQueue[T]) pop() []T {
 func (q *ipQueue[T]) popOne() (T, bool) {
 	q.Lock()
 	l := len(q.elts) - q.pos
+	// 空队列
 	if l == 0 {
 		q.Unlock()
 		var empty T
 		return empty, false
 	}
+	// 队列中的第一个元素
 	e := q.elts[q.pos]
+	// 如果元素不止1个
 	if l--; l > 0 {
+		// 将起始位置 + 1
 		q.pos++
+		// 如果设置了计算大小，则从总大小中减去当前元素的大小
 		if q.calc != nil {
 			q.sz -= q.calc(e)
 		}
 		// We need to re-signal
+		// 发送信号通知仍有元素可以消费
 		select {
 		case q.ch <- struct{}{}:
 		default:
 		}
 	} else {
 		// We have just emptied the queue, so we can reuse unless it is too big.
+		// 需要清空队列
 		if cap(q.elts) <= q.mrs {
+			// [:0] 这种方式可以保留底层数据结构不需要重新分配内存
 			q.elts = q.elts[:0]
 		} else {
+			// nil会将内存回收，并且下次重新分配内存
 			q.elts = nil
 		}
 		q.pos, q.sz = 0, 0
@@ -212,6 +238,7 @@ func (q *ipQueue[T]) popOne() (T, bool) {
 // This will also decrement the "in progress" count with the length
 // of the slice.
 // WARNING: The caller MUST never reuse `elts`.
+// 在调用pop()之后，当第一个元素被添加到队列时，slice可以被回收用于下一次push()。
 func (q *ipQueue[T]) recycle(elts *[]T) {
 	// If invoked with a nil list, nothing to do.
 	if elts == nil || *elts == nil {
