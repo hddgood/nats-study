@@ -15,27 +15,26 @@ type Publish struct {
 
 func (p *Publish) PublishMessage() (err error) {
 	var (
-		natsConn *nats.Conn
+		js  nats.JetStreamContext
+		ack *nats.PubAck
 	)
-	natsConn = natsmiddleware.NatsConn
-	err = natsConn.Publish(p.Subject, []byte(p.Message))
+	js = natsmiddleware.Js
+	for i := 0; i < 10; i++ {
+		ack, err = js.PublishMsg(&nats.Msg{
+			Subject: p.Subject,
+			Data:    []byte(p.Message),
+			Header: nats.Header{
+				"Nats-Expected-Last-Sequence": []string{fmt.Sprintf("%d", i)},
+				"key":                         []string{"value"},
+			},
+		})
+	}
+
 	if err != nil {
 		return err
 	}
-	//for i := 0; i < 10; i++ {
-	//	data := "idx: " + fmt.Sprintf("%d", i) + " " + p.Message
-	//	err = natsConn.PublishMsg(&nats.Msg{
-	//		Header:  map[string][]string{},
-	//		Subject: p.Subject,
-	//		Data:    []byte(data),
-	//		Reply:   "ok",
-	//	})
-	//	if err != nil {
-	//		return err
-	//	}
-	//}
 
-	log.Println("Published message: ", p.Subject, p.Message)
+	log.Printf("Published message: %s %s ackSeq: %d", p.Subject, p.Message, ack.Sequence)
 	return nil
 }
 

@@ -144,6 +144,6 @@ func testServiceConsume(msg *nats.Msg) error {
 	if err != nil {
 		return err
 	}
-	fmt.Println("handle message success msg", msg.Header, msg.Reply)
+	fmt.Printf("handle message success msg subject: %s, msg data: %s msg reply: %s", msg.Subject, string(msg.Data), msg.Reply)
 	return nil
 }
