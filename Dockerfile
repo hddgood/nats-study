@@ -1,5 +1,5 @@
 # 第一阶段：构建 NATS 服务器
-FROM golang:1.22-alpine AS builder
+FROM golang:1.23-alpine AS builder
 
 # 安装构建依赖
 RUN apk add --update git
