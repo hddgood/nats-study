@@ -280,7 +280,7 @@ type stream struct {
 	sid atomic.Uint64
 
 	pubAck    []byte                  // The template (prefix) to generate the pubAck responses for this stream quickly.
-	outq      *jsOutQ                 // Queue of *jsPubMsg for sending messages.
+	outq      *jsOutQ                 // Queue of *jsPubMsg for sending messages. 发送消息的队列
 	msgs      *ipQueue[*inMsg]        // Intra-process queue for the ingress of messages.
 	gets      *ipQueue[*directGetReq] // Intra-process queue for the direct get requests.
 	store     StreamStore             // The storage for this stream.
@@ -5257,6 +5257,7 @@ func (mset *stream) signalConsumersLoop() {
 }
 
 // This will update and signal all consumers that match.
+// 这里会更新并通知所有匹配的消费者
 func (mset *stream) signalConsumers(subj string, seq uint64) {
 	mset.clsMu.RLock()
 	if mset.csl == nil {
@@ -5266,6 +5267,7 @@ func (mset *stream) signalConsumers(subj string, seq uint64) {
 	r := mset.csl.Match(subj)
 	mset.clsMu.RUnlock()
 
+	// 没有消费者
 	if len(r.psubs) == 0 {
 		return
 	}

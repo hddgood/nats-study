@@ -309,11 +309,11 @@ func (dp DeliverPolicy) String() string {
 type AckPolicy int
 
 const (
-	// AckNone requires no acks for delivered messages.
+	// AckNone requires no acks for delivered messages. 不需要确认
 	AckNone AckPolicy = iota
-	// AckAll when acking a sequence number, this implicitly acks all sequences below this one as well.
+	// AckAll when acking a sequence number, this implicitly acks all sequences below this one as well. 确认所有消息
 	AckAll
-	// AckExplicit requires ack or nack for all messages.
+	// AckExplicit requires ack or nack for all messages. 需要确认所有消息
 	AckExplicit
 )
 
@@ -401,14 +401,14 @@ type consumer struct {
 	sid               int
 	name              string
 	stream            string
-	sseq              uint64         // next stream sequence
+	sseq              uint64         // next stream sequence 当前stream中下一个消息的序列号
 	subjf             subjectFilters // subject filters and their sequences
 	filters           *Sublist       // When we have multiple filters we will use LoadNextMsgMulti and pass this in.
-	dseq              uint64         // delivered consumer sequence
+	dseq              uint64         // delivered consumer sequence 已经发送给消费者的序列号
 	adflr             uint64         // ack delivery floor
 	asflr             uint64         // ack store floor
 	chkflr            uint64         // our check floor, interest streams only.
-	npc               int64          // Num Pending Count
+	npc               int64          // Num Pending Count 待处理的消息数量
 	npf               uint64         // Num Pending Floor Sequence
 	dsubj             string
 	qgroup            string
@@ -427,13 +427,13 @@ type consumer struct {
 	fcsz              int
 	fcid              string
 	fcSub             *subscription
-	outq              *jsOutQ
+	outq              *jsOutQ // 将消息发送给消费者的队列
 	pending           map[uint64]*Pending
 	ptmr              *time.Timer
 	ptmrEnd           time.Time
-	rdq               []uint64
+	rdq               []uint64 // 需要重新发送的消息队列
 	rdqi              avl.SequenceSet
-	rdc               map[uint64]uint64
+	rdc               map[uint64]uint64 // seqID : 重发次数
 	replies           map[uint64]string
 	maxdc             uint64
 	waiting           *waitQueue
@@ -4006,6 +4006,7 @@ var (
 // Get next available message from underlying store.
 // Is partition aware and redeliver aware.
 // Lock should be held.
+// 获取下一个消息 返回 消息内容 重发次数 错误
 func (o *consumer) getNextMsg() (*jsPubMsg, uint64, error) {
 	if o.mset == nil || o.mset.store == nil {
 		return nil, 0, errBadConsumer
@@ -4015,12 +4016,14 @@ func (o *consumer) getNextMsg() (*jsPubMsg, uint64, error) {
 		var seq, dc uint64
 		for seq = o.getNextToRedeliver(); seq > 0; seq = o.getNextToRedeliver() {
 			dc = o.incDeliveryCount(seq)
+			// 如果最大重发次数大于0，并且重发次数大于最大重发次数，则通知重发次数超过
 			if o.maxdc > 0 && dc > o.maxdc {
 				// Only send once
 				if dc == o.maxdc+1 {
 					o.notifyDeliveryExceeded(seq, dc-1)
 				}
 				// Make sure to remove from pending.
+				// 如果消息在pending中，则从pending中删除，并更新delivered
 				if p, ok := o.pending[seq]; ok && p != nil {
 					delete(o.pending, seq)
 					o.updateDelivered(p.Sequence, seq, dc, p.Timestamp)
@@ -4028,14 +4031,18 @@ func (o *consumer) getNextMsg() (*jsPubMsg, uint64, error) {
 				continue
 			}
 			if seq > 0 {
+				// 从对象池中获取一个对象
 				pmsg := getJSPubMsgFromPool()
+				// 从store中加载消息
 				sm, err := o.mset.store.LoadMsg(seq, &pmsg.StoreMsg)
 				if sm == nil || err != nil {
 					pmsg.returnToPool()
 					pmsg, dc = nil, 0
 					// Adjust back deliver count.
+					// 调整回重发次数
 					o.decDeliveryCount(seq)
 				}
+				// 返回消息 重发次数 错误
 				return pmsg, dc, err
 			}
 		}
@@ -4067,6 +4074,7 @@ func (o *consumer) getNextMsg() (*jsPubMsg, uint64, error) {
 	}
 
 	// Hold onto this since we release the lock.
+	// 获取stream的存储
 	store := o.mset.store
 
 	var sseq uint64
@@ -4075,6 +4083,7 @@ func (o *consumer) getNextMsg() (*jsPubMsg, uint64, error) {
 	var pmsg = getJSPubMsgFromPool()
 
 	// Grab next message applicable to us.
+	// 获取过滤器 过滤器 和 序列号
 	filters, subjf, fseq := o.filters, o.subjf, o.sseq
 	// Check if we are multi-filtered or not.
 	if filters != nil {
@@ -4084,6 +4093,7 @@ func (o *consumer) getNextMsg() (*jsPubMsg, uint64, error) {
 		sm, sseq, err = store.LoadNextMsg(filter, wc, fseq, &pmsg.StoreMsg)
 	} else {
 		// No filter here.
+		// 从存储中加载下一个消息到pmsg
 		sm, sseq, err = store.LoadNextMsg(_EMPTY_, false, fseq, &pmsg.StoreMsg)
 	}
 	if sm == nil {
@@ -4384,9 +4394,10 @@ func (o *consumer) suppressDeletion() {
 // upch is the unpause channel which fires when the PauseUntil deadline is reached.
 func (o *consumer) loopAndGatherMsgs(qch chan struct{}) {
 	// On startup check to see if we are in a reply situation where replay policy is not instant.
+	// 在启动时检查是否处于恢复状态，其中恢复策略不是立即的。
 	var (
-		lts  int64 // last time stamp seen, used for replay.
-		lseq uint64
+		lts  int64  // last time stamp seen, used for replay. 最后一次处理消息的时间戳
+		lseq uint64 // 最后一次处理消息的序列号
 	)
 
 	o.mu.RLock()
@@ -4397,6 +4408,7 @@ func (o *consumer) loopAndGatherMsgs(qch chan struct{}) {
 	if mset == nil {
 		return
 	}
+	// 如果处于恢复状态，则将lseq设置为stream的最后一个序列号
 	if getLSeq {
 		lseq = mset.state().LastSeq
 	}
@@ -4404,11 +4416,13 @@ func (o *consumer) loopAndGatherMsgs(qch chan struct{}) {
 	o.mu.Lock()
 	s := o.srv
 	// need to check again if consumer is closed
+	// double check是否关闭
 	if o.mset == nil {
 		o.mu.Unlock()
 		return
 	}
 	// For idle heartbeat support.
+	// 获取心跳计时器
 	var hbc <-chan time.Time
 	hbd, hb := o.hbTimer()
 	if hb != nil {
@@ -4419,6 +4433,7 @@ func (o *consumer) loopAndGatherMsgs(qch chan struct{}) {
 	o.mu.Unlock()
 
 	// Grab the stream's retention policy and name
+	// 获取stream的保留策略和名称
 	mset.cfgMu.RLock()
 	stream, rp := mset.cfg.Name, mset.cfg.Retention
 	mset.cfgMu.RUnlock()
@@ -4426,6 +4441,7 @@ func (o *consumer) loopAndGatherMsgs(qch chan struct{}) {
 	var err error
 
 	// Deliver all the msgs we have now, once done or on a condition, we wait for new ones.
+	// 循环处理所有消息，一旦完成或满足条件，则等待新消息
 	for {
 		var (
 			pmsg     *jsPubMsg
@@ -4449,9 +4465,11 @@ func (o *consumer) loopAndGatherMsgs(qch chan struct{}) {
 		err = nil
 
 		// If the consumer is paused then stop sending.
+		// 如果消费者处于暂停状态，则停止发送
 		if o.cfg.PauseUntil != nil && !o.cfg.PauseUntil.IsZero() && time.Now().Before(*o.cfg.PauseUntil) {
 			// If the consumer is paused and we haven't reached the deadline yet then
 			// go back to waiting.
+			// 如果消费者处于暂停状态，并且还没有达到截止时间，则返回等待状态
 			goto waitForMsgs
 		}
 
@@ -4462,10 +4480,12 @@ func (o *consumer) loopAndGatherMsgs(qch chan struct{}) {
 			}
 		} else if o.waiting.isEmpty() {
 			// If we are in pull mode and no one is waiting already break and wait.
+			// 如果消费者处于拉取模式，并且没有人在等待，则停止发送
 			goto waitForMsgs
 		}
 
 		// Grab our next msg.
+		// 获取下一个消息
 		pmsg, dc, err = o.getNextMsg()
 
 		// We can release the lock now under getNextMsg so need to check this condition again here.
@@ -4495,22 +4515,27 @@ func (o *consumer) loopAndGatherMsgs(qch chan struct{}) {
 		}
 
 		// Update our cached num pending here first.
+		// 如果不是重试消息，则更新缓存的待处理消息数量
 		if dc == 1 {
 			o.npc--
 		}
 		// Pre-calculate ackReply
+		// 拼接ackReply
 		ackReply = o.ackReply(pmsg.seq, o.dseq, dc, pmsg.ts, o.numPending())
 
 		// If headers only do not send msg payload.
 		// Add in msg size itself as header.
+		// 如果只发送头部，则不发送消息内容
 		if o.cfg.HeadersOnly {
 			convertToHeadersOnly(pmsg)
 		}
 		// Calculate payload size. This can be calculated on client side.
 		// We do not include transport subject here since not generally known on client.
+		// 计算负载大小 这可以在客户端端计算
 		sz = len(pmsg.subj) + len(ackReply) + len(pmsg.hdr) + len(pmsg.msg)
 
 		if o.isPushMode() {
+			// 如果是推送模式 则dsubj为消费者订阅的主题
 			dsubj = o.dsubj
 		} else if wr := o.nextWaiting(sz); wr != nil {
 			wrn, wrb = wr.n, wr.b
@@ -4588,6 +4613,7 @@ func (o *consumer) loopAndGatherMsgs(qch chan struct{}) {
 		}
 
 		// Do actual delivery.
+		// 实际发送消息
 		o.deliverMsg(dsubj, ackReply, pmsg, dc, rp)
 
 		// If given request fulfilled batch size, but there are still pending bytes, send information about it.
@@ -4787,6 +4813,8 @@ func convertToHeadersOnly(pmsg *jsPubMsg) {
 
 // Deliver a msg to the consumer.
 // Lock should be held and o.mset validated to be non-nil.
+// 将消息传递给消费者。
+// 锁应该被持有，并且o.mset被验证为非nil。
 func (o *consumer) deliverMsg(dsubj, ackReply string, pmsg *jsPubMsg, dc uint64, rp RetentionPolicy) {
 	if o.mset == nil {
 		pmsg.returnToPool()
@@ -4807,6 +4835,7 @@ func (o *consumer) deliverMsg(dsubj, ackReply string, pmsg *jsPubMsg, dc uint64,
 	ap := o.cfg.AckPolicy
 
 	// Cant touch pmsg after this sending so capture what we need.
+	// 不能在发送后修改pmsg，所以暂存我们需要的序列号和时间戳
 	seq, ts := pmsg.seq, pmsg.ts
 
 	// Update delivered first.
