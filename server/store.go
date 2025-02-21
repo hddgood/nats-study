@@ -152,20 +152,20 @@ const (
 )
 
 // StreamState is information about the given stream.
-// StreamState 是关于给定流的信息。
+// StreamState 是关于给定流的状态。
 type StreamState struct {
-	Msgs        uint64            `json:"messages"`
-	Bytes       uint64            `json:"bytes"`
-	FirstSeq    uint64            `json:"first_seq"`
+	Msgs        uint64            `json:"messages"`  //消息总数
+	Bytes       uint64            `json:"bytes"`     // 字节数
+	FirstSeq    uint64            `json:"first_seq"` // 第一个消息的序列号
 	FirstTime   time.Time         `json:"first_ts"`
-	LastSeq     uint64            `json:"last_seq"`
+	LastSeq     uint64            `json:"last_seq"` // 最后一个消息的序列号
 	LastTime    time.Time         `json:"last_ts"`
-	NumSubjects int               `json:"num_subjects,omitempty"`
-	Subjects    map[string]uint64 `json:"subjects,omitempty"`
-	NumDeleted  int               `json:"num_deleted,omitempty"`
+	NumSubjects int               `json:"num_subjects,omitempty"` // 主题数量
+	Subjects    map[string]uint64 `json:"subjects,omitempty"`     // 每个主题的消息总数
+	NumDeleted  int               `json:"num_deleted,omitempty"`  // 删除的消息数量
 	Deleted     []uint64          `json:"deleted,omitempty"`
 	Lost        *LostStreamData   `json:"lost,omitempty"`
-	Consumers   int               `json:"consumer_count"`
+	Consumers   int               `json:"consumer_count"` // 消费者数量
 }
 
 // SimpleState for filtered subject specific state.

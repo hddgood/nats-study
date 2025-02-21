@@ -162,7 +162,7 @@ const (
 )
 
 type psi struct {
-	total uint64
+	total uint64 // 总消息数
 	fblk  uint32
 	lblk  uint32
 }
@@ -170,26 +170,26 @@ type psi struct {
 type fileStore struct {
 	srv         *Server
 	mu          sync.RWMutex
-	state       StreamState
+	state       StreamState // 流的状态
 	tombs       []uint64
 	ld          *LostStreamData
 	scb         StorageUpdateHandler
 	ageChk      *time.Timer
 	syncTmr     *time.Timer
 	cfg         FileStreamInfo
-	fcfg        FileStoreConfig
+	fcfg        FileStoreConfig // 文件存储配置
 	prf         keyGen
 	oldprf      keyGen
-	aek         cipher.AEAD
-	lmb         *msgBlock
-	blks        []*msgBlock
-	bim         map[uint32]*msgBlock
-	psim        *stree.SubjectTree[psi]
+	aek         cipher.AEAD             // 加密密钥
+	lmb         *msgBlock               // 最后一个消息块
+	blks        []*msgBlock             // 消息块数组，每个块会存储部分消息
+	bim         map[uint32]*msgBlock    // 消息块索引
+	psim        *stree.SubjectTree[psi] // 主题索引 按主题快速定位消息块
 	tsl         int
 	adml        int
 	hh          hash.Hash64
-	qch         chan struct{}
-	fsld        chan struct{}
+	qch         chan struct{} // 用于接受结束写入状态
+	fsld        chan struct{} // 用于发出结束状态
 	cmu         sync.RWMutex
 	cfs         []ConsumerStore
 	sips        int
@@ -199,15 +199,16 @@ type fileStore struct {
 	fip         bool
 	receivedAny bool
 	firstMoved  bool
-	ttls        *thw.HashWheel
-	ttlseq      uint64 // How up-to-date is the `ttls` THW?
+	ttls        *thw.HashWheel // TTL 时间轮 用于消息的过期
+	ttlseq      uint64         // How up-to-date is the `ttls` THW?
 }
 
 // Represents a message store block and its data.
+// 每个消息块存储一部分消息，是一个独立的文件，存储一组连续的消息
 type msgBlock struct {
 	// Here for 32bit systems and atomic.
-	first      msgId
-	last       msgId
+	first      msgId // 块内第一个消息的序列号和时间戳
+	last       msgId // 块内最后一个消息的序列号和时间戳
 	mu         sync.RWMutex
 	fs         *fileStore
 	aek        cipher.AEAD
@@ -219,24 +220,24 @@ type msgBlock struct {
 	cmp        StoreCompression // Effective compression at the time of loading the block
 	liwsz      int64
 	index      uint32
-	bytes      uint64 // User visible bytes count.
-	rbytes     uint64 // Total bytes (raw) including deleted. Used for rolling to new blk.
-	msgs       uint64 // User visible message count.
+	bytes      uint64 // User visible bytes count. 块内有效消息的字节数
+	rbytes     uint64 // Total bytes (raw) including deleted. Used for rolling to new blk. 块内被删除的消息的字节数
+	msgs       uint64 // User visible message count. 块内有效的消息数量
 	fss        *stree.SubjectTree[SimpleState]
 	kfn        string
-	lwts       int64
+	lwts       int64 // 最后一条消息的时间戳
 	llts       int64
 	lrts       int64
 	lsts       int64
 	llseq      uint64
 	hh         hash.Hash64
-	cache      *cache
+	cache      *cache // 写缓存 避免频繁写磁盘
 	cloads     uint64
 	cexp       time.Duration
 	fexp       time.Duration
 	ctmr       *time.Timer
 	werr       error
-	dmap       avl.SequenceSet
+	dmap       avl.SequenceSet // 块内已经删除的序列号集合
 	fch        chan struct{}
 	qch        chan struct{}
 	lchk       [8]byte
@@ -255,12 +256,12 @@ type msgBlock struct {
 
 // Write through caching layer that is also used on loading messages.
 type cache struct {
-	buf  []byte
-	off  int
-	wp   int
-	idx  []uint32
-	lrl  uint32
-	fseq uint64
+	buf  []byte   // 缓冲区
+	off  int      // 偏移量
+	wp   int      // 写指针
+	idx  []uint32 // 每个消息在缓冲区中的偏移量
+	lrl  uint32   // 最后一个消息的长度
+	fseq uint64   // 第一个消息的序列号
 	nra  bool
 }
 
@@ -362,6 +363,7 @@ func newFileStore(fcfg FileStoreConfig, cfg StreamConfig) (*fileStore, error) {
 }
 
 func newFileStoreWithCreated(fcfg FileStoreConfig, cfg StreamConfig, created time.Time, prf, oldprf keyGen) (*fileStore, error) {
+	// 验证流名称和存储类型
 	if cfg.Name == _EMPTY_ {
 		return nil, fmt.Errorf("name required")
 	}
@@ -370,22 +372,27 @@ func newFileStoreWithCreated(fcfg FileStoreConfig, cfg StreamConfig, created tim
 	}
 	// Default values.
 	if fcfg.BlockSize == 0 {
+		// 设置块大小
 		fcfg.BlockSize = dynBlkSize(cfg.Retention, cfg.MaxBytes, prf != nil)
 	}
 	if fcfg.BlockSize > maxBlockSize {
 		return nil, fmt.Errorf("filestore max block size is %s", friendlyBytes(maxBlockSize))
 	}
 	if fcfg.CacheExpire == 0 {
+		// 缓存过期时间
 		fcfg.CacheExpire = defaultCacheBufferExpiration
 	}
 	if fcfg.SubjectStateExpire == 0 {
+		// 主题状态过期时间
 		fcfg.SubjectStateExpire = defaultFssExpiration
 	}
 	if fcfg.SyncInterval == 0 {
+		// 数据同步频率
 		fcfg.SyncInterval = defaultSyncInterval
 	}
 
 	// Check the directory
+	// 确保目录是存在且可写的
 	if stat, err := os.Stat(fcfg.StoreDir); os.IsNotExist(err) {
 		if err := os.MkdirAll(fcfg.StoreDir, defaultDirPerms); err != nil {
 			return nil, fmt.Errorf("could not create storage directory - %v", err)
@@ -403,6 +410,7 @@ func newFileStoreWithCreated(fcfg FileStoreConfig, cfg StreamConfig, created tim
 	os.Remove(tmpfile.Name())
 	dios <- struct{}{}
 
+	// 初始化一个结构体
 	fs := &fileStore{
 		fcfg:   fcfg,
 		psim:   stree.NewSubjectTree[psi](),
@@ -416,11 +424,13 @@ func newFileStoreWithCreated(fcfg FileStoreConfig, cfg StreamConfig, created tim
 	}
 
 	// Only create a THW if we're going to allow TTLs.
+	// 创建一个时间轮来处理过期消息
 	if cfg.AllowMsgTTL {
 		fs.ttls = thw.NewHashWheel()
 	}
 
 	// Set flush in place to AsyncFlush which by default is false.
+	// 是否异步刷新（fip=true则为同步）
 	fs.fip = !fcfg.AsyncFlush
 
 	// Check if this is a new setup.
@@ -449,8 +459,10 @@ func newFileStoreWithCreated(fcfg FileStoreConfig, cfg StreamConfig, created tim
 	}
 
 	// Attempt to recover our state.
+	// 尝试去恢复状态
 	err = fs.recoverFullState()
 	if err != nil {
+		// 如果是因为文件不存在，那么就是新建的流
 		if !os.IsNotExist(err) {
 			fs.warn("Recovering stream state from index errored: %v", err)
 		}
@@ -484,6 +496,7 @@ func newFileStoreWithCreated(fcfg FileStoreConfig, cfg StreamConfig, created tim
 	}
 
 	// See if we can bring back our TTL timed hash wheel state from disk.
+	// 从thw.db文件中恢复时间轮状态
 	if cfg.AllowMsgTTL {
 		if err = fs.recoverTTLState(); err != nil && !os.IsNotExist(err) {
 			fs.warn("Recovering TTL state from index errored: %v", err)
@@ -559,6 +572,7 @@ func newFileStoreWithCreated(fcfg FileStoreConfig, cfg StreamConfig, created tim
 	}
 
 	// Setup our sync timer.
+	// 启动后台定时器
 	fs.setSyncTimer()
 
 	// Spin up the go routine that will write out our full state stream index.
@@ -3580,6 +3594,7 @@ func (fs *fileStore) NumPendingMulti(sseq uint64, sl *Sublist, lastPerSubject bo
 }
 
 // SubjectsTotals return message totals per subject.
+// 返回每个主题的消息总数
 func (fs *fileStore) SubjectsTotals(filter string) map[string]uint64 {
 	fs.mu.RLock()
 	defer fs.mu.RUnlock()
@@ -3633,9 +3648,11 @@ func (mb *msgBlock) setupWriteCache(buf []byte) {
 		fi, _ = os.Stat(mb.mfn)
 	}
 	if fi != nil {
+		// 设置缓存偏移量
 		mb.cache.off = int(fi.Size())
 	}
 	mb.llts = time.Now().UnixNano()
+	// 设置缓存过期时间
 	mb.startCacheExpireTimer()
 }
 
@@ -3740,10 +3757,12 @@ func (fs *fileStore) storeRawMsg(subj string, hdr, msg []byte, seq uint64, ts, t
 	}
 
 	// Per subject max check needed.
+	// 每个主题的最大消息数量
 	mmp := uint64(fs.cfg.MaxMsgsPer)
-	var psmc uint64
+	var psmc uint64 // 是否需要检查最大消息数量
 	psmax := mmp > 0 && len(subj) > 0
 	if psmax {
+		// 使用主题树快速查找当前subject的数量
 		if info, ok := fs.psim.Find(stringToBytes(subj)); ok {
 			psmc = info.total
 		}
@@ -3751,6 +3770,7 @@ func (fs *fileStore) storeRawMsg(subj string, hdr, msg []byte, seq uint64, ts, t
 
 	var fseq uint64
 	// Check if we are discarding new messages when we reach the limit.
+	// 如果达到限制，检查是否丢弃新消息
 	if fs.cfg.Discard == DiscardNew {
 		var asl bool
 		if psmax && psmc >= mmp {
@@ -3778,6 +3798,7 @@ func (fs *fileStore) storeRawMsg(subj string, hdr, msg []byte, seq uint64, ts, t
 	}
 
 	// Check sequence.
+	// 检查消息序列号
 	if seq != fs.state.LastSeq+1 {
 		if seq > 0 {
 			return ErrSequenceMismatch
@@ -5418,6 +5439,7 @@ func (mb *msgBlock) writeMsgRecord(rl, seq uint64, subj string, mhdr, msg []byte
 	defer mb.mu.Unlock()
 
 	// Enable for writing if our mfd is not open.
+	// 确保文件打开 能够写入
 	if mb.mfd == nil {
 		if err := mb.enableForWriting(flush); err != nil {
 			return err
@@ -5425,6 +5447,7 @@ func (mb *msgBlock) writeMsgRecord(rl, seq uint64, subj string, mhdr, msg []byte
 	}
 
 	// Make sure we have a cache setup.
+	// 确保缓存存在
 	if mb.cache == nil {
 		mb.setupWriteCache(nil)
 	}
@@ -5433,6 +5456,7 @@ func (mb *msgBlock) writeMsgRecord(rl, seq uint64, subj string, mhdr, msg []byte
 	// Do this before changing the cache that would trigger a flush pending msgs call
 	// if we needed to regenerate the per subject info.
 	// Note that tombstones have no subject so will not trigger here.
+	// 更新主题索引fss，用于统计主题消息数量
 	if len(subj) > 0 && !mb.noTrack {
 		if err := mb.ensurePerSubjectInfoLoaded(); err != nil {
 			return err
@@ -5453,10 +5477,13 @@ func (mb *msgBlock) writeMsgRecord(rl, seq uint64, subj string, mhdr, msg []byte
 	// Formats
 	// Format with no header
 	// total_len(4) sequence(8) timestamp(8) subj_len(2) subj msg hash(8)
+	// 长度(4字节) 序列号(8字节) 时间戳(8字节) 主题长度(2字节) 主题 消息 哈希(8字节)
 	// With headers, high bit on total length will be set.
 	// total_len(4) sequence(8) timestamp(8) subj_len(2) subj hdr_len(4) hdr msg hash(8)
+	// 长度(4字节) 序列号(8字节) 时间戳(8字节) 主题长度(2字节) 主题 头长度(4字节) 头 消息 哈希(8字节)
 
 	// First write header, etc.
+	// 首先写入头部
 	var le = binary.LittleEndian
 	var hdr [msgHdrSize]byte
 
@@ -5472,15 +5499,18 @@ func (mb *msgBlock) writeMsgRecord(rl, seq uint64, subj string, mhdr, msg []byte
 	le.PutUint16(hdr[20:], uint16(len(subj)))
 
 	// Now write to underlying buffer.
+	// 将hdr和subj写入缓存
 	mb.cache.buf = append(mb.cache.buf, hdr[:]...)
 	mb.cache.buf = append(mb.cache.buf, subj...)
 
 	if hasHeaders {
+		// 如果有头部信息，将头部信息写入缓存 4字节
 		var hlen [4]byte
 		le.PutUint32(hlen[0:], uint32(len(mhdr)))
 		mb.cache.buf = append(mb.cache.buf, hlen[:]...)
 		mb.cache.buf = append(mb.cache.buf, mhdr...)
 	}
+	// 将消息写入缓存
 	mb.cache.buf = append(mb.cache.buf, msg...)
 
 	// Calculate hash.
@@ -5498,6 +5528,8 @@ func (mb *msgBlock) writeMsgRecord(rl, seq uint64, subj string, mhdr, msg []byte
 	// Update write through cache.
 	// Write to msg record.
 	mb.cache.buf = append(mb.cache.buf, checksum...)
+
+	// ------------ 消息写入 buf 完毕 ------------
 	mb.cache.lrl = uint32(rl)
 
 	// Set cache timestamp for last store.
@@ -5506,6 +5538,7 @@ func (mb *msgBlock) writeMsgRecord(rl, seq uint64, subj string, mhdr, msg []byte
 	// Only update index and do accounting if not a delete tombstone.
 	if seq&tbit == 0 {
 		// Accounting, do this before stripping ebit, it is ebit aware.
+		// 更新块相关信息 msgs、bytes、rbytes、first和last。
 		mb.updateAccounting(seq, ts, rl)
 		// Strip ebit if set.
 		seq = seq &^ ebit
@@ -5513,6 +5546,7 @@ func (mb *msgBlock) writeMsgRecord(rl, seq uint64, subj string, mhdr, msg []byte
 			mb.cache.fseq = seq
 		}
 		// Write index
+		// 将消息索引写入缓存
 		mb.cache.idx = append(mb.cache.idx, uint32(index)|cbit)
 	} else {
 		// Make sure to account for tombstones in rbytes.
@@ -5619,12 +5653,16 @@ func (mb *msgBlock) updateAccounting(seq uint64, ts int64, rl uint64) {
 		seq = seq &^ ebit
 	}
 
+	// 获取块内第一个消息的序号
 	fseq := atomic.LoadUint64(&mb.first.seq)
+	// 如果是这个块第一个消息
 	if (fseq == 0 || mb.first.ts == 0) && seq >= fseq {
+		// 设置第一个消息相关信息
 		atomic.StoreUint64(&mb.first.seq, seq)
 		mb.first.ts = ts
 	}
 	// Need atomics here for selectMsgBlock speed.
+	// 同时更新块内最后一个消息的序号和时间戳
 	atomic.StoreUint64(&mb.last.seq, seq)
 	mb.last.ts = ts
 	mb.rbytes += rl
@@ -5655,6 +5693,7 @@ func (fs *fileStore) writeMsgRecord(seq uint64, ts int64, subj string, hdr, msg 
 			// to compress blocks then now's the time to do it.
 			go mb.recompressOnDiskIfNeeded()
 		}
+		// 创建一个新块
 		if mb, err = fs.newMsgBlockForWrite(); err != nil {
 			return 0, err
 		}
@@ -5861,6 +5900,7 @@ func (mb *msgBlock) ensureRawBytesLoaded() error {
 func (fs *fileStore) syncBlocks() {
 	fs.mu.Lock()
 	// If closed or a snapshot is in progress bail.
+	// 如果已经关闭或者是正在进行快照
 	if fs.closed || fs.sips > 0 {
 		fs.mu.Unlock()
 		return
@@ -5872,6 +5912,7 @@ func (fs *fileStore) syncBlocks() {
 	fs.mu.Unlock()
 
 	var markDirty bool
+	// 循环针对每个块写入
 	for _, mb := range blks {
 		// Do actual sync. Hold lock for consistency.
 		mb.mu.Lock()
@@ -5880,6 +5921,7 @@ func (fs *fileStore) syncBlocks() {
 			continue
 		}
 		// See if we can close FDs due to being idle.
+		// 检查我们是否可以关闭文件，根据是否已经闲置（距离最后一次写入时间 > closeFDsIdle）
 		if mb.mfd != nil && mb.sinceLastWriteActivity() > closeFDsIdle {
 			mb.dirtyCloseWithRemove(false)
 		}
