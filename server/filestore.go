@@ -5620,6 +5620,7 @@ func (mb *msgBlock) closeFDsLockedNoCheck() {
 // bytesPending returns the buffer to be used for writing to the underlying file.
 // This marks we are in flush and will return nil if asked again until cleared.
 // Lock should be held.
+// 返回缓存中未写入的数据
 func (mb *msgBlock) bytesPending() ([]byte, error) {
 	if mb == nil || mb.mfd == nil {
 		return nil, errNoPending
@@ -6284,14 +6285,17 @@ func (mb *msgBlock) writeAt(buf []byte, woff int64) (int, error) {
 
 // flushPendingMsgsLocked writes out any messages for this message block.
 // Lock should be held.
+// 刷盘方法
 func (mb *msgBlock) flushPendingMsgsLocked() (*LostStreamData, error) {
 	// Signals us that we need to rebuild filestore state.
+
 	var fsLostData *LostStreamData
 
 	if mb.cache == nil || mb.mfd == nil {
 		return nil, nil
 	}
 
+	// 获取缓存中未写入磁盘的内容
 	buf, err := mb.bytesPending()
 	// If we got an error back return here.
 	if err != nil {
@@ -6299,10 +6303,13 @@ func (mb *msgBlock) flushPendingMsgsLocked() (*LostStreamData, error) {
 		if err == errNoPending || err == errNoCache {
 			err = nil
 		}
+		// 没有内容就不写入了
 		return nil, err
 	}
 
+	// 获取写入位置
 	woff := int64(mb.cache.off + mb.cache.wp)
+	// 写入总长度
 	lob := len(buf)
 
 	// TODO(dlc) - Normally we would not hold the lock across I/O so we can improve performance.
@@ -6323,7 +6330,9 @@ func (mb *msgBlock) flushPendingMsgsLocked() (*LostStreamData, error) {
 	}
 
 	// Append new data to the message block file.
+	// 写入数据到消息块文件
 	for lbb := lob; lbb > 0; lbb = len(buf) {
+		// 写入数据到消息块文件
 		n, err := mb.writeAt(buf, woff)
 		if err != nil {
 			mb.dirtyCloseWithRemove(false)
@@ -6343,6 +6352,7 @@ func (mb *msgBlock) flushPendingMsgsLocked() (*LostStreamData, error) {
 	}
 
 	// Clear any error.
+	// 清除写入错误
 	mb.werr = nil
 
 	// Cache may be gone.
@@ -6358,6 +6368,7 @@ func (mb *msgBlock) flushPendingMsgsLocked() (*LostStreamData, error) {
 	}
 
 	// Check for additional writes while we were writing to the disk.
+	// 检查在写入磁盘时是否有额外的写入
 	moreBytes := len(mb.cache.buf) - mb.cache.wp - lob
 
 	// Decide what we want to do with the buffer in hand. If we have load interest
