@@ -229,7 +229,7 @@ type msgBlock struct {
 	llts       int64
 	lrts       int64
 	lsts       int64
-	llseq      uint64
+	llseq      uint64 // 最近一次访问的消息的序列号
 	hh         hash.Hash64
 	cache      *cache // 写缓存 避免频繁写磁盘
 	cloads     uint64
@@ -6042,7 +6042,9 @@ func (fs *fileStore) selectMsgBlockWithIndex(seq uint64) (int, *msgBlock) {
 	const linearThresh = 32
 	nb := len(fs.blks) - 1
 
+	// 如果块数量小于线性阈值，则进行线性搜索
 	if nb < linearThresh {
+		// 根据每一个块的最后一个消息的序号进行查找
 		for i, mb := range fs.blks {
 			if seq <= atomic.LoadUint64(&mb.last.seq) {
 				return i, mb
@@ -6052,6 +6054,7 @@ func (fs *fileStore) selectMsgBlockWithIndex(seq uint64) (int, *msgBlock) {
 	}
 
 	// Do traditional binary search here since we know the blocks are sorted by sequence first and last.
+	// 否则进行二分查找
 	for low, high, mid := 0, nb, nb/2; low <= high; mid = (low + high) / 2 {
 		mb := fs.blks[mid]
 		// Right now these atomic loads do not factor in, so fine to leave. Was considering
@@ -6610,16 +6613,19 @@ checkCache:
 
 // Fetch a message from this block, possibly reading in and caching the messages.
 // We assume the block was selected and is correct, so we do not do range checks.
+// 从消息块中获取消息
 func (mb *msgBlock) fetchMsg(seq uint64, sm *StoreMsg) (*StoreMsg, bool, error) {
 	mb.mu.Lock()
 	defer mb.mu.Unlock()
 
+	// 获取块的第一个和最后一个消息的序号
 	fseq, lseq := atomic.LoadUint64(&mb.first.seq), atomic.LoadUint64(&mb.last.seq)
 	if seq < fseq || seq > lseq {
 		return nil, false, ErrStoreMsgNotFound
 	}
 
 	// See if we can short circuit if we already know msg deleted.
+	// 消息是否删除
 	if mb.dmap.Exists(seq) {
 		// Update for scanning like cacheLookup would have.
 		llseq := mb.llseq
@@ -6630,7 +6636,9 @@ func (mb *msgBlock) fetchMsg(seq uint64, sm *StoreMsg) (*StoreMsg, bool, error) 
 		return nil, expireOk, errDeletedMsg
 	}
 
+	// 如果缓存未加载，则加载缓存
 	if mb.cacheNotLoaded() {
+		// 加载块内信息
 		if err := mb.loadMsgsWithLock(); err != nil {
 			return nil, false, err
 		}
@@ -6688,6 +6696,7 @@ func (mb *msgBlock) cacheLookup(seq uint64, sm *StoreMsg) (*StoreMsg, error) {
 	// The llseq signals us when we can expire a cache at the end of a linear scan.
 	// We want to only update when we know the last reads (multiple consumers) are sequential.
 	// We want to account for forwards and backwards linear scans.
+	// 如果是线性扫描，更新最后一个消息的序号
 	if mb.llseq == 0 || seq < mb.llseq || seq == mb.llseq+1 || seq == mb.llseq-1 {
 		mb.llseq = seq
 	}
@@ -6794,9 +6803,11 @@ func (fs *fileStore) msgForSeq(seq uint64, sm *StoreMsg) (*StoreMsg, error) {
 		seq = fs.state.FirstSeq
 	}
 	// Make sure to snapshot here.
+	// 确保获取到消息块和最后一个消息的序号
 	mb, lseq := fs.selectMsgBlock(seq), fs.state.LastSeq
 	fs.mu.RUnlock()
 
+	// 如果没找到消息块，返回错误
 	if mb == nil {
 		var err = ErrStoreEOF
 		if seq <= lseq {

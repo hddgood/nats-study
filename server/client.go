@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"math/rand"
 	"net"
 	"net/http"
@@ -3923,6 +3924,7 @@ var clientNRGPrefix = []byte("$NRG.")
 // due to a permission issue.
 // 这个方法会处理客户端的入站消息，并返回消息是否被传递，以及消息是否由于权限问题未被传递。
 func (c *client) processInboundClientMsg(msg []byte) (bool, bool) {
+	log.Println("client.go processInboundClientMsg msg:", string(msg))
 	// Update statistics
 	// The msg includes the CR_LF, so pull back out for accounting.
 	// 更新统计信息

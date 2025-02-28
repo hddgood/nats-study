@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"math/rand"
 	"reflect"
 	"regexp"
@@ -399,21 +400,21 @@ type consumer struct {
 	client            *client
 	sysc              *client
 	sid               int
-	name              string
-	stream            string
-	sseq              uint64         // next stream sequence 当前stream中下一个消息的序列号
+	name              string         // 消费者名称
+	stream            string         // 消费者所属的流名称
+	sseq              uint64         // next stream sequence 下一个要处理的流序列号，表示消费者将从流的哪个序列号开始接收消息
 	subjf             subjectFilters // subject filters and their sequences
 	filters           *Sublist       // When we have multiple filters we will use LoadNextMsgMulti and pass this in.
 	dseq              uint64         // delivered consumer sequence 已经发送给消费者的序列号
-	adflr             uint64         // ack delivery floor
-	asflr             uint64         // ack store floor
+	adflr             uint64         // ack delivery floor 表示已经被确认的连续消息的最大值
+	asflr             uint64         // ack store floor 表示已经被确认的且被持久化的消息的最大值
 	chkflr            uint64         // our check floor, interest streams only.
 	npc               int64          // Num Pending Count 待处理的消息数量
-	npf               uint64         // Num Pending Floor Sequence
+	npf               uint64         // Num Pending Floor Sequence 待处理的消息的最小序列号
 	dsubj             string
 	qgroup            string
 	lss               *lastSeqSkipList
-	rlimit            *rate.Limiter
+	rlimit            *rate.Limiter // 速率限制器， 控制消息传递速率
 	reqSub            *subscription
 	ackSub            *subscription
 	ackReplyT         string
@@ -435,7 +436,7 @@ type consumer struct {
 	rdqi              avl.SequenceSet
 	rdc               map[uint64]uint64 // seqID : 重发次数
 	replies           map[uint64]string
-	maxdc             uint64
+	maxdc             uint64 // 最大重发次数
 	waiting           *waitQueue
 	cfg               ConsumerConfig
 	ici               *ConsumerInfo
@@ -4614,6 +4615,7 @@ func (o *consumer) loopAndGatherMsgs(qch chan struct{}) {
 
 		// Do actual delivery.
 		// 实际发送消息
+		log.Println("send a msg to consumer msg:", string(pmsg.msg))
 		o.deliverMsg(dsubj, ackReply, pmsg, dc, rp)
 
 		// If given request fulfilled batch size, but there are still pending bytes, send information about it.
