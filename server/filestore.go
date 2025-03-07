@@ -229,7 +229,7 @@ type msgBlock struct {
 	llts       int64
 	lrts       int64
 	lsts       int64
-	llseq      uint64 // 最近一次访问的消息的序列号
+	llseq      uint64
 	hh         hash.Hash64
 	cache      *cache // 写缓存 避免频繁写磁盘
 	cloads     uint64
@@ -2363,6 +2363,7 @@ func (mb *msgBlock) firstMatchingMulti(sl *Sublist, start uint64, sm *StoreMsg) 
 
 // Find the first matching message.
 // fs lock should be held.
+// 查找块内第一个匹配的数据
 func (mb *msgBlock) firstMatching(filter string, wc bool, start uint64, sm *StoreMsg) (*StoreMsg, bool, error) {
 	mb.mu.Lock()
 	defer mb.mu.Unlock()
@@ -2370,12 +2371,14 @@ func (mb *msgBlock) firstMatching(filter string, wc bool, start uint64, sm *Stor
 	fseq, isAll, subs := start, filter == _EMPTY_ || filter == fwcs, []string{filter}
 
 	var didLoad bool
+	// 如果fss未加载，则加载fss
 	if mb.fssNotLoaded() {
 		// Make sure we have fss loaded.
 		mb.loadMsgsWithLock()
 		didLoad = true
 	}
 	// Mark fss activity.
+	// 更新fss最后一次活动时间
 	mb.lsts = time.Now().UnixNano()
 
 	if filter == _EMPTY_ {
@@ -2384,6 +2387,7 @@ func (mb *msgBlock) firstMatching(filter string, wc bool, start uint64, sm *Stor
 	}
 
 	// If we only have 1 subject currently and it matches our filter we can also set isAll.
+	// 如果只有1个主题，并且匹配我们的过滤器，我们可以设置isAll
 	if !isAll && mb.fss.Size() == 1 {
 		if !wc {
 			_, isAll = mb.fss.Find(stringToBytes(filter))
@@ -2395,9 +2399,11 @@ func (mb *msgBlock) firstMatching(filter string, wc bool, start uint64, sm *Stor
 		}
 	}
 	// Make sure to start at mb.first.seq if fseq < mb.first.seq
+	// 获取块内第一个序列号 如果块内第一个序列号大于fseq，则设置fseq为块内第一个序列号
 	if seq := atomic.LoadUint64(&mb.first.seq); seq > fseq {
 		fseq = seq
 	}
+	// 获取块内最后一个序列号
 	lseq := atomic.LoadUint64(&mb.last.seq)
 
 	// Optionally build the isMatch for wildcard filters.
@@ -2415,6 +2421,7 @@ func (mb *msgBlock) firstMatching(filter string, wc bool, start uint64, sm *Stor
 
 	subjs := mb.fs.cfg.Subjects
 	// If isAll or our single filter matches the filter arg do linear scan.
+	// 如果是全部的消息或者当前主题只有一个，并且匹配我们的过滤器，则进行线性扫描
 	doLinearScan := isAll || (wc && len(subjs) == 1 && subjs[0] == filter)
 	// If we do not think we should do a linear scan check how many fss we
 	// would need to scan vs the full range of the linear walk. Optimize for
@@ -2427,6 +2434,7 @@ func (mb *msgBlock) firstMatching(filter string, wc bool, start uint64, sm *Stor
 	if !doLinearScan {
 		// If we have a wildcard match against all tracked subjects we know about.
 		if wc {
+			// 如果有通配符查询，则获取所有匹配的主题
 			subs = subs[:0]
 			mb.fss.Match(stringToBytes(filter), func(bsubj []byte, _ *SimpleState) {
 				subs = append(subs, string(bsubj))
@@ -2436,8 +2444,10 @@ func (mb *msgBlock) firstMatching(filter string, wc bool, start uint64, sm *Stor
 				return nil, didLoad, ErrStoreMsgNotFound
 			}
 		}
+		// fseq = 最后一个消息的序号+1
 		fseq = lseq + 1
 		for _, subj := range subs {
+			// 查找对应主题的消息
 			ss, _ := mb.fss.Find(stringToBytes(subj))
 			if ss != nil && (ss.firstNeedsUpdate || ss.lastNeedsUpdate) {
 				mb.recalculateForSubj(subj, ss)
@@ -2476,8 +2486,10 @@ func (mb *msgBlock) firstMatching(filter string, wc bool, start uint64, sm *Stor
 		sm = new(StoreMsg)
 	}
 
+	// 从start开始到最后一个块
 	for seq := fseq; seq <= lseq; seq++ {
 		llseq := mb.llseq
+		// 查找出具体消息内容
 		fsm, err := mb.cacheLookup(seq, sm)
 		if err != nil {
 			if err == errPartialCache || err == errNoCache {
@@ -2485,10 +2497,13 @@ func (mb *msgBlock) firstMatching(filter string, wc bool, start uint64, sm *Stor
 			}
 			continue
 		}
+		// 如果是块内最后一条消息并且llseq等于seq 则让缓存过期
 		expireOk := seq == lseq && mb.llseq == seq
+		// 如果是查询所有消息则直接返回
 		if isAll {
 			return fsm, expireOk, nil
 		}
+		// 如果是线性扫描 判断主题是够匹配
 		if doLinearScan {
 			if wc && isMatch(sm.subj) {
 				return fsm, expireOk, nil
@@ -3651,6 +3666,7 @@ func (mb *msgBlock) setupWriteCache(buf []byte) {
 		// 设置缓存偏移量
 		mb.cache.off = int(fi.Size())
 	}
+	// 最近一次加载时间
 	mb.llts = time.Now().UnixNano()
 	// 设置缓存过期时间
 	mb.startCacheExpireTimer()
@@ -5231,6 +5247,7 @@ func (mb *msgBlock) expireCacheLocked() {
 
 	// Check for activity on the cache that would prevent us from expiring.
 	if tns-bufts <= int64(mb.cexp) {
+		// 重置缓存过期时间
 		mb.resetCacheExpireTimer(mb.cexp - time.Duration(tns-bufts))
 		return
 	}
@@ -6696,7 +6713,7 @@ func (mb *msgBlock) cacheLookup(seq uint64, sm *StoreMsg) (*StoreMsg, error) {
 	// The llseq signals us when we can expire a cache at the end of a linear scan.
 	// We want to only update when we know the last reads (multiple consumers) are sequential.
 	// We want to account for forwards and backwards linear scans.
-	// 如果是线性扫描，更新最后一个消息的序号
+	// 识别线性扫描的情况
 	if mb.llseq == 0 || seq < mb.llseq || seq == mb.llseq+1 || seq == mb.llseq-1 {
 		mb.llseq = seq
 	}
